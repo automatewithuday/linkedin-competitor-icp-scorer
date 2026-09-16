@@ -18,7 +18,7 @@ python setup_icp.py
 
 For the exact dependency versions tested on Python 3.12, install `requirements.lock.txt` instead of `requirements.txt`.
 
-Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify for harvesting and one LLM for ranking (an OpenAI key, or your Claude subscription via the `claude` CLI; see below), Prospeo for email enrichment, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
+Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify for harvesting and one LLM for ranking (an OpenAI key, or your Claude subscription via the `claude` CLI; see below), Prospeo for email enrichment, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation and for the website step in `setup_icp.py`; without a key a plain page fetch is used, which is fine for most marketing sites but misses JavaScript-rendered content. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
 
 ## Scoring LLM
 

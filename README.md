@@ -53,7 +53,7 @@ cd linkedin-competitor-icp-scorer
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env        # add APIFY_TOKEN, and OPENAI_API_KEY unless you use Claude
-python setup_icp.py         # 8 questions about who you sell to -> writes icp.yaml
+python setup_icp.py         # give it your website, confirm the proposed ICP -> writes icp.yaml
 ```
 
 Then run it against one competitor, small and cheap:
@@ -67,6 +67,12 @@ python run.py \
 ```
 
 Open `output/first-test/ranked_engagers.csv`. That run costs well under a dollar of Apify credit and finishes in a few minutes.
+
+## Defining your ICP (the part most people get stuck on)
+
+`setup_icp.py` does not expect you to know your ICP up front. Give it your website and it proposes one (titles, industries, size, countries, customers named on the site) that you confirm or correct in nine short questions. It then expands every job title into the synonyms that actually show up in LinkedIn headlines, because "VP Sales" alone would miss "Head of Sales". Works without Firecrawl; a plain page fetch is used when no key is set. If you have no website, answer from scratch.
+
+Two things it will push you on: name one to three real best customers, and give headcount as numbers, not "SMB". Buying triggers are recorded but never used to reject anyone.
 
 ## What to expect
 

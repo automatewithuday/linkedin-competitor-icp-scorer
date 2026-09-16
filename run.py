@@ -62,8 +62,6 @@ def main() -> None:
                  'to your Claude subscription (LLM_PROVIDER=claude). See README.')
     if not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
         required.append('APIFY_TOKEN')
-    if args.domain:
-        required.append('FIRECRAWL_API_KEY')
     if args.find_emails:
         required.append('PROSPEO_API_KEY')
     if args.supabase:

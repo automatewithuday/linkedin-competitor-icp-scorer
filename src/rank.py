@@ -105,6 +105,7 @@ def icp_block(icp: dict) -> str:
         f"  excluded industries: {json.dumps(icp.get('industries_out') or [])}\n"
         f"  disqualifiers: {json.dumps(icp.get('disqualifiers') or [])}\n"
         f"  buying_triggers: {json.dumps(icp.get('buying_triggers') or [])}\n"
+        f"  example customers: {', '.join(icp.get('best_customers') or []) or 'n/a'}\n"
         f"  summary   : {icp.get('summary') or 'n/a'}"
     )
 

@@ -89,10 +89,38 @@ def _firecrawl_scrape(fc, url: str, js: bool = False) -> str:
     return (getattr(doc, "markdown", None) or "").strip()
 
 
+def _plain_scrape(url: str) -> str:
+    """No-key fallback: fetch the page and strip tags with the stdlib parser."""
+    import requests
+    from html.parser import HTMLParser
+
+    class _Text(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.parts = []; self.skip = 0
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "noscript", "svg"):
+                self.skip += 1
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "noscript", "svg") and self.skip:
+                self.skip -= 1
+        def handle_data(self, data):
+            if not self.skip and data.strip():
+                self.parts.append(data.strip())
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 (icp-intake)"})
+        r.raise_for_status()
+    except Exception:
+        return ""
+    p = _Text(); p.feed(r.text)
+    return "\n".join(p.parts)
+
+
 def _scrape_one(url: str, fc) -> str:
     text = _spider_scrape(url)
     if len(text) >= 200:
         return text
+    if fc is None:
+        return _plain_scrape(url)
     text = _firecrawl_scrape(fc, url, js=False)
     if len(text) >= 200:
         return text
@@ -101,7 +129,7 @@ def _scrape_one(url: str, fc) -> str:
 
 def gather_text(domain: str) -> tuple[str, list[str]]:
     base = f"https://{domain}" if not domain.startswith("http") else domain
-    fc = _firecrawl_client()
+    fc = _firecrawl_client() if FIRECRAWL_API_KEY else None  # no key: plain HTTP fallback
 
     chunks: list[str] = []
     sources: list[str] = []
@@ -179,6 +207,7 @@ def derive_from_yaml(icp_path: str, slug: str, out_dir: Path) -> None:
         "buying_triggers": raw.get("buying_triggers") or raw.get("triggers") or [],
         "industries": raw.get("industries") or [],
         "geos": raw.get("geos") or [],
+        "best_customers": raw.get("best_customers") or [],
         "summary": raw.get("summary") or "",
         "sources": [str(path)],
     }
