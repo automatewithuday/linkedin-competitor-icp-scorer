@@ -1,0 +1,7 @@
+# Weekly sweep targets — one LinkedIn profile URL per line.
+# Competitor founders, influencers, analysts whose audience overlaps with your buyers.
+# Lines starting with # are ignored. Copy this file to targets.txt and edit.
+#
+# https://www.linkedin.com/in/competitor-founder
+# https://www.linkedin.com/in/industry-influencer
+# https://www.linkedin.com/in/category-analyst

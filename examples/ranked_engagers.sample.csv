@@ -1,0 +1,6 @@
+rank,name,clean_title,company_guess,icp_fit,engagement_count,reaction_types,intent,rank_score,linkedin_url,comment_excerpt,email,email_status,sendable,email_provider
+1,Jane Doe,VP of Sales,Acme Corp,5,3,INTEREST,high,8.2913,https://www.linkedin.com/in/jane-doe-example,"We've been evaluating tools for exactly this problem - the signal lag is killing our outbound efficiency.",jane.doe@acmecorp.example.com,valid,true,leadmagic
+2,John Smith,Head of Revenue Operations,Widgets Inc,4,2,PRAISE,medium,4.1589,https://www.linkedin.com/in/john-smith-example,"Good stuff - we're seeing the same pattern in our pipeline reviews.",john.smith@widgetsinc.example.com,valid,true,leadmagic
+3,Alex Johnson,CRO,Placeholder LLC,5,1,INTEREST,medium,3.0000,https://www.linkedin.com/in/alex-johnson-example,,alex.j@placeholder.example.com,unknown,false,leadmagic
+4,Sam Rivera,Director of Demand Generation,Example Software,3,2,LIKE,low,1.2476,https://www.linkedin.com/in/sam-rivera-example,"Great perspective on the topic!",,,not_found,false,leadmagic
+5,Morgan Lee,VP of Business Development,Demo Technologies,4,1,EMPATHY,low,1.2000,https://www.linkedin.com/in/morgan-lee-example,,,error,false,leadmagic

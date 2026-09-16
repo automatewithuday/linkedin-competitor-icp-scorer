@@ -1,0 +1,16 @@
+.env
+output/
+*.csv
+!examples/*.csv
+__pycache__/
+*.pyc
+.DS_Store
+data/
+.venv/
+.env.*
+!.env.example
+icp.yaml
+targets.txt
+*.prospeo-cache.json
+*.smartlead.json
+*.supabase.json

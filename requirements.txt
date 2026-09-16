@@ -1,0 +1,5 @@
+openai
+firecrawl-py
+pyyaml
+python-dotenv
+requests
