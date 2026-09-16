@@ -98,3 +98,55 @@ def post_json(url, *, retry=False, accepted_errors=(), **kwargs):
             return r.json()
         except ValueError:
             raise RuntimeError('Provider returned invalid JSON') from None
+
+
+def llm_provider():
+    """'openai' (API key) or 'claude' (local `claude` CLI, billed to a Claude subscription).
+    LLM_PROVIDER wins; otherwise OpenAI if a key is set, else the claude CLI if installed."""
+    import shutil
+    p = (os.getenv('LLM_PROVIDER') or '').strip().lower()
+    if p in ('openai', 'claude'):
+        return p
+    if os.getenv('OPENAI_API_KEY'):
+        return 'openai'
+    if shutil.which('claude'):
+        return 'claude'
+    return None
+
+
+def llm_json(system, user, model=None):
+    """Ask the configured LLM for a JSON object. Returns (parsed_dict, input_tokens, output_tokens)."""
+    provider = llm_provider()
+    if provider == 'openai':
+        return _openai_json(system, user, model or os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'))
+    if provider == 'claude':
+        return _claude_cli_json(system, user, model or os.getenv('CLAUDE_MODEL', 'sonnet'))
+    raise RuntimeError('No LLM configured: set OPENAI_API_KEY, or install the `claude` CLI '
+                       'and log in to your Claude subscription (see README).')
+
+
+def _openai_json(system, user, model):
+    from openai import OpenAI
+    resp = OpenAI().chat.completions.create(
+        model=model, temperature=0, response_format={'type': 'json_object'},
+        messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': user}])
+    return json.loads(resp.choices[0].message.content), resp.usage.prompt_tokens, resp.usage.completion_tokens
+
+
+def _claude_cli_json(system, user, model):
+    import subprocess
+    proc = subprocess.run(
+        ['claude', '-p', '--model', model, '--output-format', 'json',
+         '--tools', '', '--system-prompt', system],
+        input=user, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f'claude CLI failed (exit {proc.returncode}): {proc.stderr.strip()[:500]}')
+    out = json.loads(proc.stdout)
+    if out.get('is_error'):
+        raise RuntimeError(f'claude CLI error: {str(out.get("result"))[:500]}')
+    text = (out.get('result') or '').strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1].rsplit('```', 1)[0]
+    u = out.get('usage') or {}
+    in_tok = u.get('input_tokens', 0) + u.get('cache_read_input_tokens', 0) + u.get('cache_creation_input_tokens', 0)
+    return json.loads(text), in_tok, u.get('output_tokens', 0)

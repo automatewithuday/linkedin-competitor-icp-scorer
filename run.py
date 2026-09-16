@@ -8,7 +8,7 @@ import argparse
 import os
 import re
 from dotenv import load_dotenv
-from src.common import linkedin_url
+from src.common import linkedin_url, llm_provider
 import subprocess
 import sys
 from pathlib import Path
@@ -56,7 +56,10 @@ def main() -> None:
         ap.error("Invalid scrape or lookup limits")
     if args.campaign_id is not None and (args.campaign_id < 1 or not args.find_emails):
         ap.error("--campaign-id must be positive and requires --find-emails")
-    required = ['OPENAI_API_KEY']
+    required = []
+    if not llm_provider():
+        sys.exit('No LLM for scoring: set OPENAI_API_KEY in .env, or install the `claude` CLI and log in '
+                 'to your Claude subscription (LLM_PROVIDER=claude). See README.')
     if not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
         required.append('APIFY_TOKEN')
     if args.domain:

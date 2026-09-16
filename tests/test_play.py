@@ -201,17 +201,13 @@ class HTTPTests(unittest.TestCase):
 
 class ScoringTests(unittest.TestCase):
     def client(self, results):
-        client = Mock()
-        client.chat.completions.create.return_value = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'results': results})))],
-            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
-        return client
+        return patch.object(rank, 'llm_json', return_value=({'results': results}, 1, 1))
 
     def test_bad_model_alignment_rejected(self):
         for results in [[], [{'i': 1, 'icp_fit': 4}], [{'i': 0, 'icp_fit': 4}] * 2,
                         [{'i': 0, 'icp_fit': 6}], [{'i': 0, 'icp_fit': 4, 'intent': 'urgent'}]]:
-            with self.assertRaises(ValueError):
-                rank.score_batch(self.client(results), 'ICP', [{}])
+            with self.client(results), self.assertRaises(ValueError):
+                rank.score_batch('ICP', [{}])
 
     def test_reactions_do_not_claim_buying_intent(self):
         self.assertEqual(rank.reaction_intent(['INTEREST', 'PRAISE']), 'low')
@@ -236,3 +232,16 @@ class ScoringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LlmProviderTests(unittest.TestCase):
+    def test_provider_selection(self):
+        with patch.dict('os.environ', {'LLM_PROVIDER': '', 'OPENAI_API_KEY': 'k'}):
+            self.assertEqual(common.llm_provider(), 'openai')
+        with patch.dict('os.environ', {'LLM_PROVIDER': 'claude', 'OPENAI_API_KEY': 'k'}):
+            self.assertEqual(common.llm_provider(), 'claude')
+        with patch.dict('os.environ', {'LLM_PROVIDER': '', 'OPENAI_API_KEY': ''}), \
+                patch('shutil.which', return_value=None):
+            self.assertIsNone(common.llm_provider())
+            with self.assertRaises(RuntimeError):
+                common.llm_json('s', 'u')

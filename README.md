@@ -18,11 +18,22 @@ python setup_icp.py
 
 For the exact dependency versions tested on Python 3.12, install `requirements.lock.txt` instead of `requirements.txt`.
 
-Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify and OpenAI for harvesting/ranking, Prospeo for email enrichment, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
+Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify for harvesting and one LLM for ranking (an OpenAI key, or your Claude subscription via the `claude` CLI; see below), Prospeo for email enrichment, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
+
+## Scoring LLM
+
+ICP scoring needs one LLM. Two options, no code changes:
+
+- **OpenAI API key**: set `OPENAI_API_KEY` in `.env`. Default model `gpt-4.1-mini`, override with `OPENAI_MODEL`. Pay per token; a 60-engager run costs well under a cent.
+- **Claude subscription (no API key)**: install [Claude Code](https://claude.com/claude-code), run `claude` once to log in, and leave `OPENAI_API_KEY` empty. Scoring shells out to `claude -p` and is billed against your subscription's usage limits instead of dollars. Default model `sonnet`, override with `CLAUDE_MODEL` (`haiku`, `opus`). Each batch of 25 engagers is one CLI call. Output is not temperature-pinned, so scores can differ by one point between reruns.
+
+If both are available, `LLM_PROVIDER=openai` or `LLM_PROVIDER=claude` picks one; otherwise OpenAI wins when its key is set.
+
+The scoring prompt was tuned on live runs against outbound-vendor profiles: matching titles without a named employer cap at 3, and people who sell the same category as you (agencies, consultants, tool founders) cap at 2 even when their title matches the ICP. Adjust `SYSTEM` in `src/rank.py` if your ICP does target consultants or founders.
 
 ## Test only Apify and scoring
 
-For an initial test, configure only `APIFY_TOKEN` and `OPENAI_API_KEY` in your local `.env`, then run `python setup_icp.py` to define your buyers.
+For an initial test, configure `APIFY_TOKEN` plus one scoring LLM (see "Scoring LLM") in your local `.env`, then run `python setup_icp.py` to define your buyers.
 
 ```bash
 python run.py \

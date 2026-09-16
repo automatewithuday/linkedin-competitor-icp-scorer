@@ -1,7 +1,7 @@
 """Score and rank engagers against recipient ICP.
 
 Reads <output-dir>/<slug>/engagers.json + recipient_icp.json.
-Scores every engager via gpt-4.1-mini (batched ~25 per call).
+Scores every engager via the configured LLM (OpenAI key or Claude subscription), batched ~25 per call.
 Writes <output-dir>/<slug>/ranked_engagers.csv.
 
 Scoring:
@@ -18,15 +18,13 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
 try:
-    from .common import write_csv
+    from .common import write_csv, llm_json
 except ImportError:
-    from common import write_csv
+    from common import write_csv, llm_json
 
 load_dotenv()
 
-MODEL = "gpt-4.1-mini"
 BATCH_SIZE = 25
 
 REACTION_INTENT = {
@@ -49,13 +47,26 @@ SYSTEM = (
     "buyer, and -- when a comment is provided -- how much buying intent the comment "
     "signals.\n\n"
     "icp_fit (1-5), judged on the person's position headline vs the ICP titles/industries:\n"
-    "  5 = exact ICP-title match or unmistakably the buyer persona.\n"
-    "  4 = clearly adjacent buyer (right function + seniority, ICP industry).\n"
-    "  3 = plausible influencer but not the named buyer.\n"
+    "  5 = exact ICP-title match or unmistakably the buyer persona, employed in-house at a company "
+    "that could plausibly be an ICP account.\n"
+    "  4 = clearly adjacent buyer (right function + seniority, ICP industry), employed in-house.\n"
+    "  3 = plausible influencer or ICP-titled person with no employer evidence (freelance, "
+    "fractional, consultant, 'building X', or headline names no company).\n"
     "  2 = wrong function/seniority; would not buy this.\n"
-    "  1 = irrelevant (random founder, student, vendor, peer who just liked it).\n"
+    "  1 = irrelevant (student, job seeker, vendor, peer who just liked it).\n"
+    "Rules learned from real runs:\n"
+    "- The BUYER works inside a company that would pay the recipient. People who SELL the same "
+    "category the recipient sells (use the ICP summary and disqualifiers to infer that category: "
+    "agencies, consultants, tool vendors, 'founder' of a competing service) are peers or "
+    "competitors, not buyers. Cap them at 2 even when their title matches the ICP list.\n"
+    "- A matching title alone is not enough for 4-5: the headline must also name an employer, or "
+    "make it unmistakable the person is in-house. Otherwise cap at 3.\n"
+    "- 'Founder', 'CEO', 'Co-Founder' only qualifies when the ICP titles include founders or the "
+    "company named is plausibly an ICP account; a founder of an agency/tool in the recipient's "
+    "category is a competitor (1-2).\n"
+    "- Intent from a comment never raises icp_fit; score fit and intent independently.\n"
     "Be honest and stingy. Most engagers on a viral post are NOT buyers -- score them 1-2. "
-    "Reserve 4-5 for people whose headline genuinely matches the ICP.\n\n"
+    "Reserve 4-5 for people whose headline genuinely matches the ICP AND who are in-house.\n\n"
     "intent (only when a comment is given; if no comment, return null):\n"
     "  high = comment names a problem/need/evaluation the recipient could sell into.\n"
     "  medium = curious/asking, engaged but no clear need.\n"
@@ -98,7 +109,7 @@ def icp_block(icp: dict) -> str:
     )
 
 
-def score_batch(client, icp_text: str, batch: list[dict]) -> tuple[list[dict], int, int]:
+def score_batch(icp_text: str, batch: list[dict]) -> tuple[list[dict], int, int]:
     lines = []
     for i, e in enumerate(batch):
         pos = (e.get("position") or "").replace("\n", " ").strip() or "(no headline)"
@@ -116,17 +127,7 @@ def score_batch(client, icp_text: str, batch: list[dict]) -> tuple[list[dict], i
         f"PEOPLE WHO ENGAGED ({len(batch)} total):\n" + "\n".join(lines) + "\n\n"
         "Score every numbered person and return the strict JSON."
     )
-    resp = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user},
-        ],
-    )
-    data = json.loads(resp.choices[0].message.content)
-    u = resp.usage
+    data, in_tok, out_tok = llm_json(SYSTEM, user)
 
     by_i = {}
     for r in data.get("results", []):
@@ -141,7 +142,7 @@ def score_batch(client, icp_text: str, batch: list[dict]) -> tuple[list[dict], i
     if len(by_i) != len(batch):
         raise ValueError("Model omitted scoring rows; retry rank step")
     aligned = [by_i[i] for i in range(len(batch))]
-    return aligned, u.prompt_tokens, u.completion_tokens
+    return aligned, in_tok, out_tok
 
 
 def reaction_intent(reaction_types: list[str]) -> str:
@@ -167,7 +168,6 @@ def main() -> None:
     ap.add_argument("--output-dir", default="./output", help="Base output directory")
     args = ap.parse_args()
 
-    client = OpenAI()  # reads OPENAI_API_KEY from env
     engagers, icp, base = load_inputs(args.slug, args.output_dir)
     icp_text = icp_block(icp)
     n = len(engagers)
@@ -177,7 +177,7 @@ def main() -> None:
     rows = []
     for start in range(0, n, BATCH_SIZE):
         batch = engagers[start:start + BATCH_SIZE]
-        results, bi, bo = score_batch(client, icp_text, batch)
+        results, bi, bo = score_batch(icp_text, batch)
         in_tok += bi
         out_tok += bo
         print(f"  batch {start // BATCH_SIZE + 1}: {start + len(batch)}/{n} scored")
@@ -232,13 +232,12 @@ def main() -> None:
 
     qualified = [r for r in rows if r["icp_fit"] >= 4]
     high_intent = [r for r in rows if r["intent"] == "high"]
-    cost = in_tok / 1_000_000 * 0.40 + out_tok / 1_000_000 * 1.60
 
     print("=== RANKED ===")
     print(f"  total scored   : {len(rows)}")
     print(f"  qualified (>=4): {len(qualified)}")
     print(f"  high-intent    : {len(high_intent)}")
-    print(f"  tokens in/out  : {in_tok}/{out_tok}  cost: ${cost:.4f}")
+    print(f"  tokens in/out  : {in_tok}/{out_tok}")
     print(f"  -> {out_path}")
     print("\n  TOP 10:")
     print(f"  {'#':>2}  {'fit':>3}  {'int':<6}  {'score':>7}  {'name':<26}  title")

@@ -1,7 +1,7 @@
 """Derive or load recipient ICP. Two mutually-exclusive modes:
 
   --domain <domain>   Auto mode: scrape the domain via Spider/Firecrawl and use
-                      gpt-4.1-mini to infer who the company sells to.
+                      the configured LLM to infer who the company sells to.
   --icp <path.yaml>   Manual mode: load a user-written icp.yaml and write the
                       same recipient_icp.json shape, skipping the scrape.
 
@@ -16,12 +16,14 @@ from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from .common import llm_json
+except ImportError:
+    from common import llm_json
 
 load_dotenv()
 
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY")
-MODEL = "gpt-4.1-mini"
 
 SYSTEM = (
     "You are a B2B go-to-market analyst. Given marketing copy scraped from a "
@@ -123,7 +125,6 @@ def gather_text(domain: str) -> tuple[str, list[str]]:
 
 
 def derive_from_domain(domain: str, slug: str, out_dir: Path) -> None:
-    client = OpenAI()  # reads OPENAI_API_KEY from env
     print(f"Scraping {domain} ...")
     text, sources = gather_text(domain)
     if not text:
@@ -136,18 +137,7 @@ def derive_from_domain(domain: str, slug: str, out_dir: Path) -> None:
         f"Scraped marketing copy:\n{text}\n\n"
         "Infer who this company SELLS TO and return the strict JSON."
     )
-    resp = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user},
-        ],
-    )
-    raw = json.loads(resp.choices[0].message.content)
-    u = resp.usage
-    in_tok, out_tok = u.prompt_tokens, u.completion_tokens
+    raw, in_tok, out_tok = llm_json(SYSTEM, user)
 
     icp = {
         "domain": domain,
@@ -163,14 +153,13 @@ def derive_from_domain(domain: str, slug: str, out_dir: Path) -> None:
     out_path = out_dir / "recipient_icp.json"
     out_path.write_text(json.dumps(icp, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    cost = in_tok / 1_000_000 * 0.40 + out_tok / 1_000_000 * 1.60
     print("=== DERIVED ICP ===")
     print(f"  summary    : {icp['summary']}")
     print(f"  titles     : {', '.join(icp['titles'])}")
     print(f"  size_range : {icp['size_range']}")
     print(f"  industries : {', '.join(icp['industries'])}")
     print(f"  geos       : {', '.join(icp['geos'])}")
-    print(f"  tokens in/out: {in_tok}/{out_tok}  approx cost: ${cost:.4f}")
+    print(f"  tokens in/out: {in_tok}/{out_tok}")
     print(f"  -> {out_path}")
 
 

@@ -1,6 +1,6 @@
 """Interactive ICP intake — asks ~8 questions, writes icp.yaml.
 
-If OPENAI_API_KEY is set (and user agrees), calls gpt-4.1-mini once to
+If an LLM is configured (OpenAI key or claude CLI) and the user agrees, calls it once to
 expand raw answers into a tight summary and clean the lists. Without a key
 the raw answers are written as-is.
 
@@ -34,10 +34,9 @@ def ask_list(prompt: str) -> list[str]:
 
 
 def expand_with_llm(answers: dict) -> dict:
-    """Call gpt-4.1-mini to clean lists and generate a one-sentence summary."""
-    from openai import OpenAI
+    """Call the configured LLM to clean lists and generate a one-sentence summary."""
+    from src.common import llm_json
 
-    client = OpenAI()  # reads OPENAI_API_KEY from env
     user_msg = (
         "Given this ICP intake, return a JSON object with these fields:\n"
         "  titles: list of job title strings (deduplicated, properly capitalised)\n"
@@ -51,17 +50,8 @@ def expand_with_llm(answers: dict) -> dict:
         f"Raw answers:\n{json.dumps(answers, indent=2)}\n\n"
         "Return STRICT JSON only."
     )
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system",
-             "content": "You are a B2B GTM analyst. Clean and structure an ICP intake."},
-            {"role": "user", "content": user_msg},
-        ],
-    )
-    return json.loads(resp.choices[0].message.content)
+    data, _, _ = llm_json("You are a B2B GTM analyst. Clean and structure an ICP intake.", user_msg)
+    return data
 
 
 def build_yaml(raw: dict) -> dict:
@@ -105,11 +95,12 @@ def main() -> None:
     )
 
     # Optional LLM expansion
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if openai_key:
-        use_llm = ask("\nOpenAI key found. Use gpt-4.1-mini to clean and summarise? (y/n)", "y")
+    from src.common import llm_provider
+    provider = llm_provider()
+    if provider:
+        use_llm = ask(f"\nLLM available ({provider}). Use it to clean and summarise? (y/n)", "y")
         if use_llm.lower().startswith("y"):
-            print("  Calling gpt-4.1-mini ...")
+            print(f"  Calling {provider} ...")
             try:
                 expanded = expand_with_llm(answers)
                 icp = build_yaml(expanded)
