@@ -1,6 +1,6 @@
 # Operating this play
 
-Read README.md for current commands. Providers: Apify, OpenAI, Prospeo, Smartlead; optional Supabase.
+Read README.md for the overview and docs/OPERATIONS.md for current commands and caveats. Providers: Apify, OpenAI, Prospeo, Smartlead; optional Supabase.
 
 Use the user's ICP and target profiles. Never invent an ICP from unrelated prior projects. Keep API credentials in .env and never print them. Proceed with authorized work without repeated permission prompts.
 

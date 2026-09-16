@@ -1,139 +1,119 @@
-# LinkedIn warm leads — Prospeo + Smartlead + Supabase
+# LinkedIn Competitor ICP Scorer
 
-Collect a competitor founder's LinkedIn post engagers, rank them against your ICP, find verified work emails with Prospeo, and prepare a Smartlead campaign import. CSV is always retained; Supabase is optional.
+**Turn the people engaging with your competitors' LinkedIn posts into a ranked list of warm leads that match your ideal customer.**
 
-Adapted from [LeadGrowGTM/linkedin-warm-leads](https://github.com/LeadGrowGTM/linkedin-warm-leads), MIT licensed. Original license retained. Upstream baseline: `c7ae920823c6c2e048e6a218a6f6bb4031d1833d`. This version uses direct provider APIs; it does not require Deepline.
+When a competitor's founder posts on LinkedIn, the people who like and comment are telling you something: they care about the problem you solve. This tool collects those people, scores each one against your ideal customer profile (ICP) with an LLM, and gives you a spreadsheet sorted by who is most worth reaching out to. Optionally it finds their work email and stages them for a cold email campaign.
 
-## Setup
+## How it works
 
-Python 3.11+ is required. Run commands from the repository root.
+```
+ Competitor's LinkedIn profile
+            │
+            ▼
+ 1. Harvest      Pull their recent posts + everyone who reacted or commented   (Apify)
+            │
+            ▼
+ 2. Load ICP     Read who you sell to from icp.yaml                             (you)
+            │
+            ▼
+ 3. Score        Rate every engager 1–5 on ICP fit + read comments for intent   (OpenAI or Claude)
+            │
+            ▼
+ 4. Rank         Sort by fit × how often they engaged × buying intent           ──▶  ranked_engagers.csv
+            │
+            ▼  (optional)
+ 5. Enrich       Find verified work emails                                      (Prospeo)
+ 6. Push         Stage a Smartlead campaign import; you approve before it sends (Smartlead)
+```
+
+Steps 1 to 4 are the core. Steps 5 and 6 are opt-in flags.
+
+## What you get
+
+A CSV with one row per engager, best leads first. The columns that matter:
+
+| column | meaning |
+|---|---|
+| `icp_fit` | 1 to 5. How well their headline matches your ICP. 4 and 5 are qualified. |
+| `intent` | `high`, `medium`, or `low`. From their comment if they left one; reactions alone are always `low`. |
+| `engagement_count` | How many of the competitor's posts they touched. Repeat engagers rank higher. |
+| `rank_score` | The sort key. Fit, engagement, and intent combined. |
+| `comment_excerpt` | What they said, so your first message can reference it. |
+| `linkedin_url`, `company_guess`, `clean_title` | Who they are. |
+
+See [examples/ranked_engagers.sample.csv](examples/ranked_engagers.sample.csv) for a full sample.
+
+## Quickstart
+
+You need Python 3.11+, an [Apify](https://apify.com) token, and one LLM for scoring: either an OpenAI API key, or a Claude subscription through the [Claude Code](https://claude.com/claude-code) CLI (no API key needed, just run `claude` once to log in).
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/automatewithuday/linkedin-competitor-icp-scorer.git
+cd linkedin-competitor-icp-scorer
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-python setup_icp.py
+cp .env.example .env        # add APIFY_TOKEN, and OPENAI_API_KEY unless you use Claude
+python setup_icp.py         # 8 questions about who you sell to -> writes icp.yaml
 ```
 
-For the exact dependency versions tested on Python 3.12, install `requirements.lock.txt` instead of `requirements.txt`.
-
-Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify for harvesting and one LLM for ranking (an OpenAI key, or your Claude subscription via the `claude` CLI; see below), Prospeo for email enrichment, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
-
-## Scoring LLM
-
-ICP scoring needs one LLM. Two options, no code changes:
-
-- **OpenAI API key**: set `OPENAI_API_KEY` in `.env`. Default model `gpt-4.1-mini`, override with `OPENAI_MODEL`. Pay per token; a 60-engager run costs well under a cent.
-- **Claude subscription (no API key)**: install [Claude Code](https://claude.com/claude-code), run `claude` once to log in, and leave `OPENAI_API_KEY` empty. Scoring shells out to `claude -p` and is billed against your subscription's usage limits instead of dollars. Default model `sonnet`, override with `CLAUDE_MODEL` (`haiku`, `opus`). Each batch of 25 engagers is one CLI call. Output is not temperature-pinned, so scores can differ by one point between reruns.
-
-If both are available, `LLM_PROVIDER=openai` or `LLM_PROVIDER=claude` picks one; otherwise OpenAI wins when its key is set.
-
-The scoring prompt was tuned on live runs against outbound-vendor profiles: matching titles without a named employer cap at 3, and people who sell the same category as you (agencies, consultants, tool founders) cap at 2 even when their title matches the ICP. Adjust `SYSTEM` in `src/rank.py` if your ICP does target consultants or founders.
-
-## Test only Apify and scoring
-
-For an initial test, configure `APIFY_TOKEN` plus one scoring LLM (see "Scoring LLM") in your local `.env`, then run `python setup_icp.py` to define your buyers.
-
-```bash
-python run.py \
-  --profile https://www.linkedin.com/in/YOUR-TARGET \
-  --slug scraping-test-01 \
-  --icp icp.yaml \
-  --max-posts 3 --max-reactions 20 --max-comments 10 \
-  --posted-limit month
-```
-
-This produces `output/scraping-test-01/ranked_engagers.csv` without email enrichment, campaign imports, or database writes. Compare sampled engagers and comments with the source posts, then manually review high, borderline and low ICP scores. The current qualification threshold is `icp_fit >= 4`; missing company size and geography still require verification.
-
-After changing your ICP, rescore the saved scrape without running Apify again:
-
-```bash
-python src/icp.py --slug scraping-test-01 --icp icp.yaml
-python src/rank.py --slug scraping-test-01
-```
-
-## Run the play
+Then run it against one competitor, small and cheap:
 
 ```bash
 python run.py \
   --profile https://www.linkedin.com/in/COMPETITOR-FOUNDER \
-  --slug competitor-2026-09-16 \
+  --slug first-test \
   --icp icp.yaml \
-  --max-posts 10 \
-  --find-emails --min-fit 4 --max-lookups 100
+  --max-posts 3 --max-reactions 20 --max-comments 10
 ```
 
-Outputs in `output/competitor-2026-09-16/`:
+Open `output/first-test/ranked_engagers.csv`. That run costs well under a dollar of Apify credit and finishes in a few minutes.
 
-- `posts.json`, `engagers.json`: source evidence and deduplicated engagers.
-- `recipient_icp.json`: criteria used for scoring.
-- `ranked_engagers.csv`: everyone, including low-fit leads, source profile and post references.
-- `enriched.csv`: all rows with email verification fields and a `miss_reason` for every skipped/unresolved row.
-- `enriched.prospeo-cache.json`: checkpointed enrichment results, reusable for 30 days.
+## What to expect
 
-`--find-emails` is optional. Default harvesting caps posts at 10, reactions at 100/post and comments at 50/post, over the last month. Use `--posted-limit week` or `24h`. `--max-posts 0` removes the post cap and may increase spend. Lookups are capped at 100 and fit >=4 by default. Cached lookups do not consume that cap. Caps limit requests, not currency; check your provider plans.
+Honest numbers from testing this on three outbound-agency founders' profiles, 3 posts each: 136 engagers scored, 2 qualified. The scoring was right. The audiences were wrong.
 
-The rank score combines ICP fit, number of distinct posts engaged with, and comment intent. Reactions alone remain low intent. Engagement is a prioritization signal, not proof of purchase intent. Headline-only scoring cannot establish missing company size, geography, or industry. Review the ranked output before outreach. ICP exclusions and triggers are included in the prompt; this is not a substitute for a CRM suppression list.
+**The target profile matters more than anything else.** People who engage with a vendor's posts are mostly other vendors, consultants, and peers. To find buyers, pick profiles your buyers actually follow: a product founder in your category, a well-known voice with your buyer's job title, an analyst. The scorer is deliberately stingy and will tell you quickly whether a profile's audience is worth mining.
 
-Prospeo matches a public LinkedIn URL first, or a full name plus known `domain`/`company_website`. It never enriches from `company_guess` alone. Only revealed, syntactically valid addresses with `VERIFIED` status become sendable. Errors fail the command after saving the CSV; rerun the enrichment step to reuse successful checkpoints. A `NO_MATCH` is a normal miss, not a pipeline error.
+Once you find a good profile, scale up: `--max-posts 10` with default caps gives roughly four times the sample.
 
-## Smartlead
+## Going further
 
-Create or choose a campaign in Smartlead. Preview an import locally:
+- **Get emails and push to a campaign**: add `--find-emails` and `--campaign-id`. Nothing sends without an explicit `--execute` on a separate command. Details in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- **Tune the scoring**: your ICP lives in `icp.yaml` (titles, industries, exclusions, disqualifiers, triggers). Rescore a saved harvest without paying Apify again:
+  ```bash
+  python src/icp.py --slug first-test --icp icp.yaml
+  python src/rank.py --slug first-test
+  ```
+- **Write the outreach**: [playbooks/](playbooks/) has three openers keyed to the CSV columns, a positioning play, and a battle-card prompt.
+- **Run weekly**: list profiles in `targets.txt` and use the `/weekly-sweep` command in Claude Code.
+- **Store history**: optional Supabase export keeps every run's scores.
 
-```bash
-python src/push.py --input output/competitor-2026-09-16/enriched.csv \
-  --campaign-id 123
+## Costs
+
+| what | cost |
+|---|---|
+| Apify harvest | about $0.002 per item. 3 posts with small caps is under $0.20; 10 posts at default caps is $2 to $3. |
+| Scoring with OpenAI | under one cent per 100 engagers on `gpt-4.1-mini`. |
+| Scoring with Claude subscription | no dollars; counts against your plan's usage limits. |
+| Prospeo emails | per lookup, capped at 100 per run by default. |
+
+## Repo map
+
+```
+run.py            one command that runs the whole pipeline
+setup_icp.py      interactive ICP intake -> icp.yaml
+src/harvest.py    Apify: posts + engagers
+src/icp.py        load icp.yaml (or infer an ICP from a website with --domain)
+src/rank.py       LLM scoring + ranking; the scoring prompt lives here
+src/email_enrich.py   Prospeo
+src/push.py       Smartlead preview / import
+src/common.py     shared helpers, including the OpenAI-or-Claude switch
+docs/OPERATIONS.md    full command reference and every caveat
+docs/SCHEMAS.md   Apify actor input/output shapes
+playbooks/        outreach copy and positioning
+tests/            mocked, no API spend: python -m unittest discover -s tests
 ```
 
-Review the generated `.smartlead.json` file. Then import explicitly:
+## Credits
 
-```bash
-python src/push.py --input output/competitor-2026-09-16/enriched.csv \
-  --campaign-id 123 --execute
-```
-
-Importing into an active campaign can start sending. This code does not create sequences or activate campaigns. It requires fit >=4, `sendable=true`, `email_status=VERIFIED`, and verification within 30 days. It excludes `suppressed=true` rows and deduplicates email addresses. Smartlead's global block list, unsubscribe, bounce and cross-campaign duplicate checks remain enabled. Optional flags: `--min-fit`, `--max-email-age-days`, `--receipt`.
-
-Imports use batches of at most 400 and save confirmed added/skipped counts, IDs and skip details. A timeout, malformed response or inconsistent counts stop the import with an unconfirmed receipt. Reconcile that batch in Smartlead before retrying; writes are not automatically replayed and exactly-once delivery is not guaranteed. A receipt covers one invocation; copy it before retrying if you need to retain all attempts. Local suppression is supported through the CSV column; inbound reply/unsubscribe webhooks are not implemented.
-
-You can pass `--campaign-id 123` to `run.py` with `--find-emails` to generate the preview at the end. The orchestrator never executes the campaign import.
-
-## Optional Supabase storage
-
-1. Run [`sql/001_warm_leads.sql`](sql/001_warm_leads.sql) in your project's SQL editor.
-2. Set `SUPABASE_URL` and `SUPABASE_SECRET_KEY` (or legacy `SUPABASE_SERVICE_ROLE_KEY`) in `.env`.
-3. Add `--supabase` to the pipeline command, or export an existing CSV:
-
-```bash
-python src/supabase_export.py \
-  --input output/competitor-2026-09-16/enriched.csv \
-  --run-id competitor-2026-09-16
-```
-
-Rows are upserted into `warm_lead_snapshots` on `(run_id, lead_key)`. Retrying the same run does not create duplicate snapshots. Use a new dated run ID for each new sweep to retain scoring history. A normalized LinkedIn URL, falling back to the actor ID, identifies each lead. The entire CSV row is preserved in JSONB. Supabase never replaces the CSV.
-
-RLS is enabled and public roles have no access. Use the secret key only server-side. Export is chunked, not transactional across batches: after a failure, rerun with the same run ID. Identity can change if an opaque actor later gains a public URL; automatic identity reconciliation is not implemented. Snapshots are observations, not a CRM lifecycle table.
-
-## Rerun individual stages
-
-```bash
-python src/rank.py --slug competitor-2026-09-16
-python src/email_enrich.py --input output/competitor-2026-09-16/ranked_engagers.csv \
-  --output output/competitor-2026-09-16/enriched.csv --min-fit 4 --max-lookups 100
-```
-
-Re-running `run.py` starts another paid harvest. Reuse individual stages when recovering. Do not run concurrent jobs against the same slug/output files. No recurring schedule is installed by this project.
-
-The optional upstream `--enrich` company-scraping stage is retained, but its company output is not yet joined into ranking; it is not needed for Prospeo email enrichment.
-
-## Validation
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-Tests use mocked provider responses and do not spend API credits or send emails. Live setup requires your keys, ICP, target profiles and campaign ID.
-
-API references: [Prospeo Enrich Person](https://prospeo.io/api-docs/enrich-person), [Smartlead import](https://api.smartlead.ai/api-reference/campaigns/add-leads), [Supabase API security](https://supabase.com/docs/guides/api/securing-your-api). The original generated PDF setup guide was removed because it described the previous provider stack; this README is the current guide.
+Adapted from [LeadGrowGTM/linkedin-warm-leads](https://github.com/LeadGrowGTM/linkedin-warm-leads), MIT licensed. This version calls provider APIs directly and does not require Deepline.
