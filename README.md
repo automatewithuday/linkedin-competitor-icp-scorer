@@ -22,8 +22,9 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
  4. Rank         Sort by fit × how often they engaged × buying intent           ──▶  ranked_engagers.csv
             │
             ▼  (optional)
- 5. Enrich       Find verified work emails                                      (Prospeo)
- 6. Push         Stage a Smartlead campaign import; you approve before it sends (Smartlead)
+ 5. Draft        Connection note + DM per qualified lead, one playbook template each ──▶  drafts.csv
+ 6. Enrich       Find verified work emails                                      (Prospeo)
+ 7. Push         Stage a Smartlead campaign import; you approve before it sends (Smartlead)
 ```
 
 Steps 1 to 4 are the core. Steps 5 and 6 are opt-in flags.
@@ -90,7 +91,7 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
   python src/icp.py --slug first-test --icp icp.yaml
   python src/rank.py --slug first-test
   ```
-- **Write the outreach**: [playbooks/](playbooks/) has three openers keyed to the CSV columns, a positioning play, and a battle-card prompt.
+- **Write the outreach**: add `--draft` (or run `python src/draft.py --slug first-test`) to get `drafts.csv` with a LinkedIn connection note and a DM for every lead at fit 4+. Each row is written strictly inside one of the three openers in [playbooks/copy-templates.md](playbooks/copy-templates.md), picked by the fit/intent/comment table there. `--min-fit 3` also drafts the Integration-Partner note for adjacent vendors. Nothing is sent; read and edit before use. The playbooks folder also has a positioning play and a battle-card prompt for writing by hand.
 - **Run weekly**: list profiles in `targets.txt` and use the `/weekly-sweep` command in Claude Code.
 - **Store history**: optional Supabase export keeps every run's scores.
 

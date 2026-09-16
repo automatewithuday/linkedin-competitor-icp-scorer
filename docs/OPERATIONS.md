@@ -120,6 +120,7 @@ RLS is enabled and public roles have no access. Use the secret key only server-s
 
 ```bash
 python src/rank.py --slug competitor-2026-09-16
+python src/draft.py --slug competitor-2026-09-16 --min-fit 4   # drafts.csv; one LLM call per 10 rows
 python src/email_enrich.py --input output/competitor-2026-09-16/ranked_engagers.csv \
   --output output/competitor-2026-09-16/enriched.csv --min-fit 4 --max-lookups 100
 ```

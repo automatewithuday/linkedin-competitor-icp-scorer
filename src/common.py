@@ -120,7 +120,13 @@ def llm_json(system, user, model=None):
     if provider == 'openai':
         return _openai_json(system, user, model or os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'))
     if provider == 'claude':
-        return _claude_cli_json(system, user, model or os.getenv('CLAUDE_MODEL', 'sonnet'))
+        m = model or os.getenv('CLAUDE_MODEL', 'sonnet')
+        try:
+            return _claude_cli_json(system, user, m)
+        except json.JSONDecodeError:
+            # ponytail: CLI has no JSON mode; free text with stray quotes breaks parsing. One retry.
+            return _claude_cli_json(system, user + '\n\nYour last reply was not valid JSON. '
+                                    'Return ONLY a JSON object; escape or avoid double quotes inside strings.', m)
     raise RuntimeError('No LLM configured: set OPENAI_API_KEY, or install the `claude` CLI '
                        'and log in to your Claude subscription (see README).')
 

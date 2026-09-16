@@ -1,4 +1,4 @@
-"""Orchestrator: harvest -> (enrich) -> icp -> rank
+"""Orchestrator: harvest -> (enrich) -> icp -> rank -> (draft)
 
 Usage:
   python run.py --profile <linkedin-url> --slug <slug> --domain <domain> [options]
@@ -44,6 +44,8 @@ def main() -> None:
     ap.add_argument("--find-emails", action="store_true", help="Enrich qualified leads with Prospeo")
     ap.add_argument("--min-fit", type=int, choices=range(1, 6), default=4)
     ap.add_argument("--max-lookups", type=int, default=100)
+    ap.add_argument("--draft", action="store_true",
+                    help="Draft connection note + DM per qualified row using playbooks/copy-templates.md")
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
     ap.add_argument("--campaign-id", type=int, help="Generate a Smartlead import preview")
     args = ap.parse_args()
@@ -123,6 +125,9 @@ def main() -> None:
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
     final_csv = out_csv
+    if args.draft:
+        run_step("Draft outreach copy", [py, "src/draft.py", "--slug", slug, "--output-dir", out,
+                 "--min-fit", str(max(3, args.min_fit))])
     if args.find_emails:
         final_csv = out_csv.with_name("enriched.csv")
         run_step("Prospeo verified emails", [py, "src/email_enrich.py", "--input", str(out_csv),

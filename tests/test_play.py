@@ -245,3 +245,18 @@ class LlmProviderTests(unittest.TestCase):
             self.assertIsNone(common.llm_provider())
             with self.assertRaises(RuntimeError):
                 common.llm_json('s', 'u')
+
+
+class DraftTests(unittest.TestCase):
+    def test_template_mapping_is_strict(self):
+        from src import draft
+        self.assertIsNone(draft.pick_template(2, 'high', 'we need this badly'))
+        self.assertEqual(draft.pick_template(3, 'high', 'anything'), 'Integration-Partner')
+        self.assertEqual(draft.pick_template(5, 'high', 'Great post!'), 'Pain-Pivot')
+        self.assertEqual(draft.pick_template(4, 'medium', ''), 'Pain-Pivot')
+        self.assertEqual(draft.pick_template(4, 'high', 'Half the list is enrichment. None solve decay.'), 'Assumed-Knowledge')
+
+    def test_topic_falls_back_to_url_slug(self):
+        from src import draft
+        posts = {'1': {'content': '', 'url': 'https://www.linkedin.com/posts/x_28-apis-that-turn-any-agent-into-a-gtm-engine-activity-7505-X4vU'}}
+        self.assertEqual(draft.post_topic(['1'], posts), '28 apis that turn any agent into a gtm engine')
