@@ -24,7 +24,8 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
             ▼  (optional)
  5. Draft        Connection note + DM per qualified lead, one playbook template each ──▶  drafts.csv
  6. Enrich       Find verified work emails                                      (Prospeo)
- 7. Push         Stage a Smartlead campaign import; you approve before it sends (Smartlead)
+ 7. Push         Stage a Smartlead (email) or HeyReach (LinkedIn) import;    (Smartlead / HeyReach)
+                 you approve before anything sends
 ```
 
 Steps 1 to 4 are the core. Steps 5 and 6 are opt-in flags.
@@ -85,7 +86,7 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 
 ## Going further
 
-- **Get emails and push to a campaign**: add `--find-emails` and `--campaign-id`. Nothing sends without an explicit `--execute` on a separate command. Details in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+- **Get emails and push to a campaign**: add `--find-emails` and `--campaign-id` for Smartlead email campaigns, or `--heyreach-list-id` for HeyReach LinkedIn outreach (no email needed; drafts ride along as custom fields). Nothing sends without an explicit `--execute` on a separate command. Details in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 - **Tune the scoring**: your ICP lives in `icp.yaml` (titles, industries, exclusions, disqualifiers, triggers). Rescore a saved harvest without paying Apify again:
   ```bash
   python src/icp.py --slug first-test --icp icp.yaml
@@ -112,7 +113,9 @@ setup_icp.py      interactive ICP intake -> icp.yaml
 src/harvest.py    Apify: posts + engagers
 src/icp.py        load icp.yaml (or infer an ICP from a website with --domain)
 src/rank.py       LLM scoring + ranking; the scoring prompt lives here
+src/draft.py      outreach drafts from playbook templates
 src/email_enrich.py   Prospeo
+src/push_heyreach.py  HeyReach list/campaign push (LinkedIn)
 src/push.py       Smartlead preview / import
 src/common.py     shared helpers, including the OpenAI-or-Claude switch
 docs/OPERATIONS.md    full command reference and every caveat

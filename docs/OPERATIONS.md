@@ -100,6 +100,15 @@ Imports use batches of at most 400 and save confirmed added/skipped counts, IDs 
 
 You can pass `--campaign-id 123` to `run.py` with `--find-emails` to generate the preview at the end. The orchestrator never executes the campaign import.
 
+## HeyReach (LinkedIn outreach)
+
+```bash
+python src/push_heyreach.py --input output/<slug>/ranked_engagers.csv --list-id <id>
+python src/push_heyreach.py --input output/<slug>/ranked_engagers.csv --list-id <id> --execute
+```
+
+Preview is the default and writes `<input>.heyreach.json`. `--list-id` adds leads to a HeyReach lead list, which never sends; attach the list to a campaign in HeyReach. `--campaign-id <id> --linkedin-account-id <seat>` adds straight into a running campaign and can start sending. Requires `HEYREACH_API_KEY` for `--execute` only. Eligible rows need fit >= `--min-fit` (default 4) and a LinkedIn URL; member-ID URLs (`/in/ACoAA...`) are accepted since LinkedIn resolves them. Email is optional and attached only when `email_status=VERIFIED`. If `drafts.csv` exists in the same folder, `template`, `connection_note` and `dm` are attached as custom fields alongside `clean_title`, `icp_fit`, `intent`, `rank_score`, `comment_excerpt`, `source_profile` and `post_urls`, so they can be used as personalisation variables in sequences. Batches are 100 (the HeyReach cap); a batch whose response counts do not add up is written to the receipt as unconfirmed and stops the run. Custom-field shape follows the public API as documented by third parties (`customUserFields: [{name, value}]`); verify on the first live push.
+
 ## Optional Supabase storage
 
 1. Run [`sql/001_warm_leads.sql`](../sql/001_warm_leads.sql) in your project's SQL editor.

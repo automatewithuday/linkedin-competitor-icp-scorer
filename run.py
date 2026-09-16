@@ -48,6 +48,7 @@ def main() -> None:
                     help="Draft connection note + DM per qualified row using playbooks/copy-templates.md")
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
     ap.add_argument("--campaign-id", type=int, help="Generate a Smartlead import preview")
+    ap.add_argument("--heyreach-list-id", type=int, help="Generate a HeyReach list push preview (LinkedIn outreach)")
     args = ap.parse_args()
     load_dotenv()
     if not linkedin_url(args.profile):
@@ -137,6 +138,9 @@ def main() -> None:
     if args.campaign_id:
         run_step("Smartlead preview", [py, "src/push.py", "--input", str(final_csv),
                  "--campaign-id", str(args.campaign_id), "--min-fit", str(args.min_fit)])
+    if args.heyreach_list_id:
+        run_step("HeyReach preview", [py, "src/push_heyreach.py", "--input", str(final_csv),
+                 "--list-id", str(args.heyreach_list_id), "--min-fit", str(args.min_fit)])
     print(f"\n{'='*60}")
     print("PIPELINE COMPLETE")
     print(f"  Slug       : {slug}")
