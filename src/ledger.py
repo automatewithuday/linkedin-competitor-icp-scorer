@@ -40,6 +40,9 @@ BLOCKING = ('imported', 'contacted', 'replied', 'excluded', 'needs_reconciliatio
 EXPORT_FIELDS = ['ledger_icp_hash', 'ledger_evidence_hash', 'ledger_rubric_hash', 'ledger_score_hash']
 STATUS_PRIORITY = {'failed': 0, 'unconfirmed': 1, 'needs_reconciliation': 2,
                    'imported': 3, 'contacted': 4, 'replied': 5, 'excluded': 6}
+SCORE_COLUMNS = ['contact_id', 'icp_id', 'icp_fit', 'intent', 'evidence_comment', 'clean_title',
+                 'company_guess', 'evidence_hash', 'rubric_hash', 'scorer', 'slug', 'scored_at',
+                 'qualification_reason', 'intent_reason']
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT, evidence_hash TEXT,
@@ -55,7 +58,9 @@ CREATE TABLE IF NOT EXISTS lookups (opaque_id TEXT PRIMARY KEY, status TEXT NOT 
 CREATE TABLE IF NOT EXISTS icp_versions (id INTEGER PRIMARY KEY, hash TEXT UNIQUE, icp TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS scores (contact_id INTEGER NOT NULL, icp_id INTEGER NOT NULL, icp_fit INTEGER,
     intent TEXT, evidence_comment INTEGER, clean_title TEXT, company_guess TEXT, evidence_hash TEXT,
-    rubric_hash TEXT, scorer TEXT, slug TEXT, scored_at TEXT, PRIMARY KEY (contact_id, icp_id));
+    rubric_hash TEXT, scorer TEXT, slug TEXT, scored_at TEXT,
+    qualification_reason TEXT NOT NULL DEFAULT '', intent_reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (contact_id, icp_id));
 CREATE TABLE IF NOT EXISTS campaign_contacts (contact_id INTEGER NOT NULL, campaign TEXT NOT NULL, status TEXT NOT NULL,
     email TEXT, receipt TEXT, updated_at TEXT, UNIQUE (contact_id, campaign));
 CREATE TABLE IF NOT EXISTS suppressions (key TEXT PRIMARY KEY, reason TEXT, added_at TEXT);
@@ -69,6 +74,11 @@ def connect(path=None):
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    columns = {r['name'] for r in con.execute('PRAGMA table_info(scores)')}
+    with con:
+        for column in ('qualification_reason', 'intent_reason'):
+            if column not in columns:
+                con.execute(f"ALTER TABLE scores ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     return con
 
 
@@ -101,7 +111,12 @@ def score_context(e, icp, system):
 
 
 def score_hash(score):
-    return digest({k: score[k] for k in ('icp_fit', 'intent', 'evidence_comment', 'clean_title', 'company_guess')})
+    return digest({k: score[k] for k in ('icp_fit', 'intent', 'evidence_comment', 'clean_title', 'company_guess',
+                                       'qualification_reason', 'intent_reason')})
+
+
+def has_reasons(score):
+    return all(isinstance(score[k], str) and score[k].strip() for k in ('qualification_reason', 'intent_reason'))
 
 
 def aliases_of(e=None, url=None, actor_id=None):
@@ -139,7 +154,8 @@ def merge(con, keep, drop):
     for r in con.execute('SELECT * FROM scores WHERE contact_id=?', (drop,)).fetchall():
         current = con.execute('SELECT scored_at FROM scores WHERE contact_id=? AND icp_id=?', (keep, r['icp_id'])).fetchone()
         if not current or (r['scored_at'] or '') >= (current['scored_at'] or ''):
-            con.execute('INSERT OR REPLACE INTO scores VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', (keep, *list(r)[1:]))
+            con.execute(f'INSERT OR REPLACE INTO scores ({",".join(SCORE_COLUMNS)}) VALUES ({",".join("?" * len(SCORE_COLUMNS))})',
+                        (keep, *(r[k] for k in SCORE_COLUMNS[1:])))
     con.execute('DELETE FROM scores WHERE contact_id=?', (drop,))
     for table in ('aliases', 'engagements', 'profile_snapshots'):
         con.execute(f'UPDATE OR IGNORE {table} SET contact_id=? WHERE contact_id=?', (keep, drop))
@@ -273,9 +289,10 @@ def record_scores(con, engagers, results, icp, system, scorer, slug):
         if cid is None:
             continue
         touch_evidence(con, cid, e)
-        con.execute('INSERT OR REPLACE INTO scores VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        con.execute(f'INSERT OR REPLACE INTO scores ({",".join(SCORE_COLUMNS)}) VALUES ({",".join("?" * len(SCORE_COLUMNS))})',
                     (cid, icp_id, r.get('icp_fit'), r.get('intent'), r.get('evidence_comment'), r.get('clean_title'),
-                     r.get('company_guess'), evidence_hash(e), rh, scorer, slug, now()))
+                     r.get('company_guess'), evidence_hash(e), rh, scorer, slug, now(),
+                     r.get('qualification_reason') or '', r.get('intent_reason') or ''))
     con.commit()
 
 
@@ -288,9 +305,10 @@ def fresh_scores(con, engagers, icp, system):
     for i, e in enumerate(engagers):
         cid = find_contact(con, aliases_of(e))
         s = cid and con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?', (cid, icp_id)).fetchone()
-        if s and s['evidence_hash'] == evidence_hash(e) and s['rubric_hash'] == rh:
+        if s and s['evidence_hash'] == evidence_hash(e) and s['rubric_hash'] == rh and has_reasons(s):
             out[i] = {'i': i, 'icp_fit': s['icp_fit'], 'intent': s['intent'], 'evidence_comment': s['evidence_comment'],
                       'clean_title': s['clean_title'], 'company_guess': s['company_guess'],
+                      'qualification_reason': s['qualification_reason'], 'intent_reason': s['intent_reason'],
                       'score_context': score_context(e, icp, system)}
     return out
 
@@ -333,10 +351,10 @@ def status_for(con, aliases, icp_id=None, rh=None, ev=None, email=None):
         if c:
             return f'in_campaign:{c[0]}'
         if icp_id is not None:
-            s = con.execute('SELECT evidence_hash, rubric_hash FROM scores WHERE contact_id=? AND icp_id=?',
+            s = con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?',
                             (cid, icp_id)).fetchone()
             current = con.execute('SELECT evidence_hash FROM contacts WHERE id=?', (cid,)).fetchone()[0]
-            if not s or s['evidence_hash'] != ev or s['rubric_hash'] != rh or current != ev:
+            if not s or s['evidence_hash'] != ev or s['rubric_hash'] != rh or current != ev or not has_reasons(s):
                 return 'stale_score'
     elif icp_id is not None:
         return 'stale_score'
@@ -356,11 +374,25 @@ def gate(con, base):
         e = engagers.get(r.get('actor_id')) or {}
         r['ledger_status'] = status_for(con, aliases_of(url=r.get('linkedin_url'), actor_id=r.get('actor_id')),
                                         icp_id, rh, evidence_hash(e) if e else None, r.get('email'))
+        r['eligibility_reason'] = eligibility_reason(r['ledger_status'])
         cid = find_contact(con, aliases_of(e))
         score = con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?', (cid, icp_id)).fetchone() if cid else None
         r.update(dict(zip(EXPORT_FIELDS, [icp_hash(icp), evidence_hash(e), rh, score_hash(score) if score else ''])))
-    write_csv(base / 'ranked_engagers.csv', rows, fields + [k for k in ['ledger_status'] + EXPORT_FIELDS if k not in fields])
+    write_csv(base / 'ranked_engagers.csv', rows, fields + [k for k in ['ledger_status', 'eligibility_reason'] + EXPORT_FIELDS if k not in fields])
     return Counter(r['ledger_status'].split(':')[0] for r in rows)
+
+
+def eligibility_reason(status):
+    if status == 'eligible':
+        return 'Ledger checks passed: current score and no recorded suppression or campaign block. ICP fit and channel suitability still apply.'
+    if status == 'stale_score':
+        return 'Hold outreach: score or explanation is missing or does not match the current evidence, ICP or rubric; rescore first.'
+    kind, _, detail = status.partition(':')
+    if kind == 'suppressed':
+        return f'Do not contact: on the do-not-contact list ({detail}).'
+    if kind == 'in_campaign':
+        return f'Hold outreach: campaign history already records this person in {detail}; resolve any uncertain import in the provider first.'
+    return f'Hold outreach: ledger status {status}.'
 
 
 def save_campaign(con, cid, campaign, status, email=None, receipt=None, updated_at=None, resolve=False):

@@ -21,10 +21,16 @@ def verified_row(**changes):
     return row
 
 
+def explained(result):
+    return {'qualification_reason': 'The stated role and employer evidence were compared with the ICP.',
+            'intent_reason': 'Intent reflects the supplied comment or reaction evidence.', **result}
+
+
 def bind_scores(base, path):
     engagers = json.loads((base / 'engagers.json').read_text())
     recipient = json.loads((base / 'recipient_icp.json').read_text())
     data = json.loads(path.read_text())
+    data['results'] = [explained(result) for result in data['results']]
     for result in data['results']:
         result['score_context'] = ledger.score_context(engagers[result['i']], recipient, rank.SYSTEM)
     path.write_text(json.dumps(data))
@@ -294,7 +300,7 @@ class ActivityTests(unittest.TestCase):
 
 class ScorerAndSummaryTests(unittest.TestCase):
     def test_align_accepts_in_session_scores_and_rejects_gaps(self):
-        good = {'results': [{'i': 1, 'icp_fit': 4, 'intent': None}, {'i': 0, 'icp_fit': 2, 'intent': 'high'}]}
+        good = {'results': [explained({'i': 1, 'icp_fit': 4, 'intent': None}), explained({'i': 0, 'icp_fit': 2, 'intent': 'high'})]}
         self.assertEqual([r['icp_fit'] for r in rank.align(good, 2)], [2, 4])
         for bad in [{'results': [{'i': 0, 'icp_fit': 4}]},                       # missing row 1
                     {'results': [{'i': 0, 'icp_fit': 6}, {'i': 1, 'icp_fit': 1}]},  # fit out of range
@@ -682,7 +688,7 @@ class LedgerTests(unittest.TestCase):
         con = ledger.connect()
         e = {'id': 'ACoAA1', 'name': 'J', 'position': 'CRO', 'location': ''}
         icp = {'titles': ['CRO']}
-        ledger.record_scores(con, [e], [{'icp_fit': 4, 'intent': None}], icp, 'rubric', 'in-session', 'a')
+        ledger.record_scores(con, [e], [explained({'icp_fit': 4, 'intent': None})], icp, 'rubric', 'in-session', 'a')
         self.assertEqual(list(ledger.fresh_scores(con, [e], icp, 'rubric')), [0])
         moved = {**e, 'location': 'Mumbai, India'}
         self.assertEqual(ledger.fresh_scores(con, [moved], icp, 'rubric'), {})                    # evidence changed
@@ -691,7 +697,7 @@ class LedgerTests(unittest.TestCase):
         icp_id = ledger.icp_version(con, icp)
         self.assertEqual(ledger.status_for(con, ['id:ACoAA1'], icp_id, ledger.rubric_hash('rubric'),
                                            ledger.evidence_hash(moved)), 'stale_score')
-        ledger.record_scores(con, [moved], [{'icp_fit': 2, 'intent': None}], icp, 'rubric', 'in-session', 'a')
+        ledger.record_scores(con, [moved], [explained({'icp_fit': 2, 'intent': None})], icp, 'rubric', 'in-session', 'a')
         self.assertEqual(ledger.status_for(con, ['id:ACoAA1'], icp_id, ledger.rubric_hash('rubric'),
                                            ledger.evidence_hash(moved)), 'eligible')
         self.assertEqual(ledger.fresh_scores(con, [moved], icp, 'rubric')[0]['icp_fit'], 2)
@@ -699,15 +705,15 @@ class LedgerTests(unittest.TestCase):
     def test_scores_belong_to_contact_and_icp(self):
         con = ledger.connect()
         e = {'id': 'ACoAA1', 'position': 'CRO'}
-        ledger.record_scores(con, [e], [{'icp_fit': 5}], {'client': 'A'}, 'r', 's', 'x')
-        ledger.record_scores(con, [e], [{'icp_fit': 1}], {'client': 'B'}, 'r', 's', 'x')
+        ledger.record_scores(con, [e], [explained({'icp_fit': 5})], {'client': 'A'}, 'r', 's', 'x')
+        ledger.record_scores(con, [e], [explained({'icp_fit': 1})], {'client': 'B'}, 'r', 's', 'x')
         self.assertEqual((ledger.fresh_scores(con, [e], {'client': 'A'}, 'r')[0]['icp_fit'],
                           ledger.fresh_scores(con, [e], {'client': 'B'}, 'r')[0]['icp_fit']), (5, 1))
 
     def test_rank_reuses_fresh_scores_and_dump_hides_them(self):
         engs = [{'id': 'ACoAA1', 'name': 'Seen', 'position': 'CRO'}, {'id': 'ACoAA2', 'name': 'New', 'position': 'CTO'}]
         base = self.run_dir('s', engs)
-        ledger.record_scores(ledger.connect(), engs[:1], [{'icp_fit': 5, 'intent': None, 'clean_title': 'CRO'}],
+        ledger.record_scores(ledger.connect(), engs[:1], [explained({'icp_fit': 5, 'intent': None, 'clean_title': 'CRO'})],
                              {'titles': ['CRO']}, rank.SYSTEM, 'in-session', 'old')
         out = io.StringIO()
         with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--dump']), patch('sys.stdout', out):
@@ -755,7 +761,7 @@ class LedgerTests(unittest.TestCase):
         base = self.run_dir('g', engs)
         con = ledger.connect()
         icp = json.loads((base / 'recipient_icp.json').read_text())
-        ledger.record_scores(con, engs, [{'icp_fit': 5}, {'icp_fit': 5}], icp, rank.SYSTEM, 'in-session', 'g')
+        ledger.record_scores(con, engs, [explained({'icp_fit': 5}), explained({'icp_fit': 5})], icp, rank.SYSTEM, 'in-session', 'g')
         con.execute("INSERT INTO suppressions VALUES ('url:https://www.linkedin.com/in/bob', 'teammate', 'now')"); con.commit()
         common.write_csv(base / 'ranked_engagers.csv',
                          [{'name': e['name'], 'icp_fit': '5', 'actor_id': e['id'], 'linkedin_url': e['linkedinUrl']} for e in engs],

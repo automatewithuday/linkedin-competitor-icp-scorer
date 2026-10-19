@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -14,7 +15,7 @@ except ImportError:
     from common import atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from activity_intel import username
 
-FIELDS = ['linkedin_outreach_ready', 'outreach_ready_probability', 'outreach_reason', 'activity_status',
+FIELDS = ['linkedin_outreach_ready', 'outreach_ready_probability', 'outreach_reason', 'activity_reason', 'activity_model', 'activity_status',
           'activity_level', 'activity_confidence', 'days_since_last_activity', 'last_activity_type',
           'most_recent_activity_url', 'data_quality_warning', 'activity_miss_reason']
 TOOL = Path(__file__).with_name('activity_intel.py')
@@ -30,7 +31,32 @@ def eligible(row, min_fit):
     return (url, '') if url else ('', 'no_public_url')
 
 
-def join(rows, results, min_fit):
+def miss_reason(why, row, min_fit):
+    if why == 'below_min_fit':
+        return f'Activity not checked: ICP fit {fit(row)} is below the required {min_fit}; review the qualification reason.'
+    if why.startswith('ledger_'):
+        return 'Activity not checked: ' + (row.get('eligibility_reason') or f'ledger blocked outreach ({row.get("ledger_status")}).')
+    if why == 'no_public_url':
+        return 'Activity not checked: no usable public LinkedIn profile URL was available.'
+    if why == 'no_verdict':
+        return 'Activity is unknown: collection or the Jev judgment failed; no conclusion about inactivity can be drawn.'
+    return 'Activity not assessed: no result was returned for this person, possibly because the check limit was reached.'
+
+
+def fallback_reason(hit):
+    if hit.get('activity_status') == 'no_activity_observed':
+        return 'No public posts, comments or reactions were observed in the sample; recent LinkedIn use is not established.'
+    ready = (hit.get('linkedin_outreach_ready') or '').lower()
+    probability = hit.get('outreach_ready_probability')
+    reason = f'Observed activity status: {hit.get("activity_status") or "unknown"}.'
+    if probability not in (None, ''):
+        reason += f' Jev LinkedIn outreach readiness: {ready or "unknown"} (probability {probability}).'
+    if hit.get('days_since_last_activity') not in (None, ''):
+        reason += f' Latest sampled activity: {hit.get("last_activity_type") or "unknown type"}, {hit["days_since_last_activity"]} days ago.'
+    return reason
+
+
+def join(rows, results, min_fit, model=None):
     by_user = {username(r.get('linkedin_url')): r for r in results}
     for row in rows:
         url, why = eligible(row, min_fit)
@@ -38,10 +64,23 @@ def join(rows, results, min_fit):
         verdict = dict.fromkeys(FIELDS, '')
         if hit is None:
             verdict['activity_miss_reason'] = why or 'not_in_result'
+            verdict['activity_status'] = 'not_checked'
+            verdict['activity_reason'] = miss_reason(verdict['activity_miss_reason'], row, min_fit)
         elif not hit.get('activity_status'):
             verdict['activity_miss_reason'] = 'no_verdict'  # fetch or TypeSafe failed; see upstream csv `error`
+            verdict['activity_status'] = 'unknown'
+            verdict['data_quality_warning'] = 'true'
+            verdict['activity_reason'] = miss_reason('no_verdict', row, min_fit)
+            for field in ('days_since_last_activity', 'last_activity_type', 'most_recent_activity_url'):
+                verdict[field] = hit.get(field) or ''
         else:  # upstream writes Python bools as True/False; this repo uses true/false
             verdict.update({k: hit[k].lower() if hit[k] in ('True', 'False') else hit[k] for k in FIELDS if k in hit})
+            verdict['activity_reason'] = hit.get('outreach_reason') or fallback_reason(hit)
+            if verdict.get('data_quality_warning') == 'true':
+                verdict['activity_reason'] += ' Some activity evidence is missing or uncertain; review the available evidence before outreach.'
+            if hit.get('outreach_ready_probability') not in (None, ''):
+                verdict['activity_model'] = model or ''
+        verdict['outreach_reason'] = verdict['activity_reason']  # retain the original column for existing consumers
         row.update(verdict)
 
 
@@ -60,7 +99,9 @@ def main():
     work = Path(args.output).with_suffix('')  # output/<slug>/activity/
     urls = list(dict.fromkeys(u for u, _ in (eligible(r, args.min_fit) for r in rows) if u))
     print(f'Rows: {len(rows)}; eligible profiles: {len(urls)}', file=sys.stderr)
+    model = None
     if urls:  # upstream exits 1 on an empty list; nothing eligible is a normal outcome here
+        model = tomllib.loads(Path(args.config).read_text(encoding='utf-8'))['judge']['model']
         # .txt so the *.csv glob only sees upstream output; a dry run writes nothing into the run folder
         listing = Path(tempfile.mkdtemp()) / 'input.txt' if args.dry_run else work / 'input.txt'
         atomic_text(listing, '\n'.join(urls) + '\n')
@@ -74,7 +115,7 @@ def main():
     if args.dry_run:
         return
     results = read_csv(max(work.glob('*.csv'), key=lambda p: p.name))[0] if urls else []
-    join(rows, results, args.min_fit)
+    join(rows, results, args.min_fit, model)
     write_csv(args.output, rows, fields + [x for x in FIELDS if x not in fields])
     print(f'Rows: {len(rows)}; checked: {len(results)}; '
           f'outreach_ready: {sum(r["linkedin_outreach_ready"] == "true" for r in rows)}')

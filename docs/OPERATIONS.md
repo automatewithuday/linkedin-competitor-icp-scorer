@@ -22,7 +22,7 @@ Fill in `.env` locally. Do not paste keys into chat or commit them. You need Api
 
 ICP scoring needs a judge. Three options, no code changes:
 
-- **In-session (Claude Code, no key):** after the harvest run `uv run src/rank.py --dump --slug <slug>`, judge every numbered engager with the rubric in `src/rank.py` (`SYSTEM`), write `output/<slug>/scores.json` as `{"results": [{"i": 0, "score_context": "copy from dump", "icp_fit": 1-5, "intent": "high"|"medium"|"low"|null, "evidence_comment": 2|null, "clean_title": "...", "company_guess": "..."|null}, ...]}` with one object per engager. The dump shows up to 900 characters of each person's comments as `c1`, `c2`, ...; `evidence_comment` names the one the intent rests on, and that comment becomes `comment_excerpt`, with the post it was left on in `comment_post_url`, and continue with `uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores output/<slug>/scores.json ...`. The same validation applies to every scorer.
+- **In-session (Claude Code, no key):** after the harvest run `uv run src/rank.py --dump --slug <slug>`, judge every numbered engager with the rubric in `src/rank.py` (`SYSTEM`), write `output/<slug>/scores.json` as `{"results": [{"i": 0, "score_context": "copy from dump", "icp_fit": 1-5, "qualification_reason": "ICP evidence, mismatch or missing facts", "intent_reason": "comment evidence or reaction-only limitation", "intent": "high"|"medium"|"low"|null, "evidence_comment": 2|null, "clean_title": "...", "company_guess": "..."|null}, ...]}` with one object per engager. The dump shows up to 900 characters of each person's comments as `c1`, `c2`, ...; `evidence_comment` names the one the intent rests on, and that comment becomes `comment_excerpt`, with the post it was left on in `comment_post_url`, and continue with `uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores output/<slug>/scores.json ...`. The same validation applies to every scorer.
 
 - **OpenAI API key** (automatic): set `OPENAI_API_KEY` in `.env`. Default model `gpt-4.1-mini`, override with `OPENAI_MODEL`. Pay per token; a 60-engager run costs well under a cent.
 - **Claude subscription via the CLI** (automatic, no API key; picked automatically when `claude` is on PATH and no OpenAI key is set, which is always true inside Claude Code, so pass `--scores` there): install [Claude Code](https://claude.com/claude-code), run `claude` once to log in, and leave `OPENAI_API_KEY` empty. Scoring shells out to `claude -p` and is billed against your subscription's usage limits instead of dollars. Default model `sonnet`, override with `CLAUDE_MODEL` (`haiku`, `opus`). Each batch of 25 engagers is one CLI call. Output is not temperature-pinned, so scores can differ by one point between reruns.
@@ -169,7 +169,7 @@ Every run ends with `src/summary.py`: counts, fit distribution, resolve, activit
 
 ## LinkedIn activity check (optional)
 
-`--activity` answers one question per qualified lead: does this person actually use LinkedIn right now, and how? It fetches each profile's recent public posts, comments and reactions (HarvestAPI actors on Apify), computes dates and counts in plain code, and asks [TypeSafe](https://typesafe.ai) for typed judgments. No LinkedIn login. Cost is about $0.04 per profile checked (Apify) plus a negligible TypeSafe charge. Set `TYPESAFE_API_KEY` in `.env`.
+`--activity` answers one question per qualified lead: does this person actually use LinkedIn right now, and how? Activity Intel fetches recent public posts, comments and reactions (HarvestAPI actors on Apify), computes dates and counts in plain code, and uses **Jev through [TypeSafe](https://typesafe.ai)** for typed judgments. The configured model is `jev-latest` by default (`activity.toml`). Plain-language explanations combine the sampled evidence with those verdicts. No LinkedIn login. Cost is about $0.04 per profile checked (Apify) plus a negligible TypeSafe charge. Set `TYPESAFE_API_KEY` in `.env`.
 
 ```bash
 uv run run.py --profile https://www.linkedin.com/in/COMPETITOR-FOUNDER --slug competitor-2026-09-16 \
@@ -178,7 +178,9 @@ uv run run.py --profile https://www.linkedin.com/in/COMPETITOR-FOUNDER --slug co
 
 Only rows with `icp_fit >= --min-fit` and a public `/in/` URL are checked. Rows whose opaque `/in/ACoAA...` id was not resolved (see "Opaque profile IDs") get `activity_miss_reason=no_public_url`. Everyone in a harvest engaged within the harvest window by construction, so read the result as a posting-habit and recency signal for prioritisation and channel choice, not as proof of inactivity.
 
-The stage appends these columns and changes nothing else: `linkedin_outreach_ready`, `outreach_ready_probability` (sort by this), `outreach_reason`, `activity_status` (`active` / `stale` / `inactive` / `no_activity_observed`), `activity_level`, `activity_confidence`, `days_since_last_activity`, `last_activity_type`, `most_recent_activity_url`, `data_quality_warning`, `activity_miss_reason` (`below_min_fit`, `no_public_url`, `not_in_result`, `no_verdict`). Email enrichment, Supabase and Smartlead read the augmented CSV unchanged; nothing is gated on the verdict. Rows with `data_quality_warning=true` deserve a look before outreach.
+The stage preserves qualification and intent explanations and appends activity fields: `linkedin_outreach_ready`, `outreach_ready_probability` (sort by this), `activity_reason`, `outreach_reason`, `activity_model`, `activity_status` (`active` / `stale` / `inactive` / `no_activity_observed` / `not_checked` / `unknown`), `activity_level`, `activity_confidence`, `days_since_last_activity`, `last_activity_type`, `most_recent_activity_url`, `data_quality_warning`, `activity_miss_reason` (`below_min_fit`, `no_public_url`, `not_in_result`, `no_verdict`). Email enrichment, Supabase and Smartlead read the augmented CSV unchanged; nothing is gated on the verdict. Rows with `data_quality_warning=true` deserve a look before outreach.
+
+`activity_reason` is the readable explanation for every row, including skipped or failed checks; `outreach_reason` mirrors it for compatibility. `activity_model` names the configured model only when a readiness probability was returned. Skipped rows have `activity_status=not_checked`; a failed collection or judgment has `activity_status=unknown` and a data-quality warning. Neither means inactive. Rejected ICP rows explain why they were not checked; suppressed or previously imported people explain the ledger block. Limits and missing public profile URLs are reported explicitly too.
 
 Standalone, always dry-run first; it prints the eligible count, the Apify estimate and the hard spend cap without spending anything:
 
@@ -189,7 +191,7 @@ uv run src/activity.py --input output/competitor-2026-09-16/ranked_engagers.csv 
   --output output/competitor-2026-09-16/activity.csv --limit 20
 ```
 
-The full ~40-column result, a JSONL copy and the raw actor output land in `output/<slug>/activity/`. To re-judge after changing `activity.toml` without paying Apify again, add `--from-raw output/<slug>/activity/raw/<run>`. Profile lookups write public URLs back into the harvest, so `ranked_engagers.csv` already carries them. After a rescore, re-join activity for free with `--from-raw`.
+The full ~40-column result, a JSONL copy and the raw actor output land in `output/<slug>/activity/`. To re-judge after changing `activity.toml` without paying Apify again, add `--from-raw output/<slug>/activity/raw/<run>`. Profile lookups write public URLs back into the harvest, so `ranked_engagers.csv` already carries them. After a rescore, use `--from-raw` to re-judge and re-join activity without recollecting it through Apify.
 
 `activity.toml` holds the fetch caps, the outreach-ready threshold and the exact TypeSafe question wording. It is user-owned. `src/activity_intel.py` is vendored unchanged from [LinkedIn-Profile-Activity-Intel](https://github.com/automatewithuday/LinkedIn-Profile-Activity-Intel) (MIT, commit `7a3aabd`); that README explains the evidence rules, including why reactions only give a lower bound on the date.
 
@@ -215,6 +217,14 @@ uv run src/resolve.py --slug competitor-2026-09-16 --batch-size 10   # then resc
 ```
 
 ## Ledger (SQLite)
+
+### Reasons in every export
+
+Scorers must return `qualification_reason` and `intent_reason` for every person. The first explains the observed ICP match, mismatch and important missing evidence; the second explains comment-based intent or the limitations of reaction-only engagement. Empty or missing explanations are rejected for both in-session and automatic scoring. `qualification_threshold` records the selected `--min-fit`; `qualification_status` is `qualified` at or above it, otherwise `rejected`; changing the threshold recalculates the status without discarding the evidence explanation.
+
+The ledger persists both explanations and includes them in score provenance. Existing SQLite databases gain the two explanation columns automatically without losing lookup or campaign history. Scores without explanations require rescoring. Run `rank.py --dump`, review the current evidence, and include the two reasons and the new `score_context` in every submitted result; do not manufacture explanations for old scores. Regenerate the gate and downstream CSVs after rescoring.
+
+`eligibility_reason` explains whether ledger checks passed or why suppression, campaign history or stale scoring blocks outreach stages. ICP fit, ledger eligibility and activity readiness are separate decisions; review their reasons together. [The sample CSV](../examples/ranked_engagers.sample.csv) illustrates all three with [fictional buyer criteria and cases](../examples/README.md).
 
 `src/ledger.py` keeps a local SQLite file, `data/ledger.sqlite` (override with `LEDGER_DB`; git-ignored). CSVs remain the per-run output; the ledger is the memory across runs, competitors and campaigns. It uses Python's built-in `sqlite3`, so there is nothing to install or host.
 

@@ -5,9 +5,10 @@ Writes <output-dir>/<slug>/ranked_engagers.csv.
 
 Two scorers:
   --scores PATH   judgments produced by Claude (or a human) in-session: JSON {"results": [...]} with one
-                  object per engager {i, score_context, icp_fit, intent, clean_title, company_guess}; no API key needed.
+                  object per engager {i, score_context, icp_fit, qualification_reason, intent, intent_reason,
+                  clean_title, company_guess}; no API key needed.
   (default)       the configured LLM (OPENAI_API_KEY, or the `claude` CLI on a Claude subscription), ~25 per call.
-  --dump          print the numbered engager list to score (headline + first comment) and exit.
+  --dump          print the numbered engager list to score (headline, profile evidence and comments) and exit.
 
 Scoring:
   icp_fit (1-5): semantic match of position headline vs ICP titles/industries.
@@ -80,12 +81,19 @@ SYSTEM = (
     "  high = comment names a problem/need/evaluation the recipient could sell into.\n"
     "  medium = curious/asking, engaged but no clear need.\n"
     "  low = generic praise, congrats, emoji, self-promotion.\n\n"
+    "Explain every score, including rejected and borderline people. qualification_reason: one or two short "
+    "sentences naming the observed role/employer/location evidence and the ICP rule it matches or fails. "
+    "State important missing evidence (such as unverified company size or industry); never present guesses as "
+    "verified facts. Describe the basis for the fit score, without assuming a particular qualification threshold. "
+    "intent_reason: one short sentence explaining the supporting comment, or that reaction-only engagement "
+    "does not establish buying intent. Provide concise decision explanations, not hidden deliberation.\n\n"
     "Also extract, from the position headline: clean_title (the role, no company/emoji), "
     "function (e.g. Sales, Engineering, Support, Marketing, Founder, Ops), seniority "
     "(C-level / VP / Director / Manager / IC / Founder / Unknown), and company_guess "
     "(the employer if stated in the headline, else null).\n\n"
     "Return STRICT JSON only, no prose:\n"
-    '{"results":[{"i":<number>,"icp_fit":<1-5>,"intent":"high|medium|low"|null,'
+    '{"results":[{"i":<number>,"icp_fit":<1-5>,"qualification_reason":"evidence and ICP match or mismatch",'
+    '"intent":"high|medium|low"|null,"intent_reason":"comment evidence or reaction-only limitation",'
     '"evidence_comment":<comment number>|null,'
     '"clean_title":"...","function":"...","seniority":"...","company_guess":"..."|null}]}'
     "\nReturn exactly one result object per input number."
@@ -172,6 +180,9 @@ def align(data: dict, n: int) -> list[dict]:
             raise ValueError("Scorer returned invalid ICP fit")
         if r.get("intent") not in (None, "low", "medium", "high"):
             raise ValueError("Scorer returned invalid intent")
+        for key in ('qualification_reason', 'intent_reason'):
+            if not isinstance(r.get(key), str) or not r[key].strip():
+                raise ValueError(f'Scorer must explain every row: missing or empty {key} for engager {i}')
         by_i[i] = r
     if len(by_i) != n:
         raise ValueError("Scorer omitted rows; every engager needs exactly one result")
@@ -225,8 +236,11 @@ def main() -> None:
         print(icp_block(icp))
         print(f"\nENGAGERS: {n}. {len(reused)} reuse a fresh ledger score (same evidence, ICP and rubric) and are not "
               f"shown. Score the {len(pending)} below with the rubric in rank.SYSTEM; write "
-              f"{{\"results\": [{{i, score_context, icp_fit, intent, evidence_comment, clean_title, company_guess}}]}}. "
+              f"{{\"results\": [{{i, score_context, icp_fit, qualification_reason, intent, intent_reason, "
+              f"evidence_comment, clean_title, company_guess}}]}}. "
               f"Copy each row's score_context exactly; it binds the judgment to this evidence, ICP and rubric. "
+              f"Explain the ICP evidence and any mismatch or missing facts for every person, including rejections; "
+              f"explain comment intent separately. "
               f"scores.json may hold only these rows: rank.py fills the rest from the ledger.")
         lines = engager_lines(engagers, names=True)
         print("\n".join(lines[i] + f' | score_context: {ledger.score_context(engagers[i], icp, SYSTEM)}' for i in pending))
@@ -286,6 +300,9 @@ def main() -> None:
                     intent = "low"
             else:
                 intent = reaction_intent(e.get("reaction_types"))
+            r['qualification_reason'] = ' '.join(r['qualification_reason'].split())
+            r['intent_reason'] = (' '.join(r['intent_reason'].split()) if has_comment else
+                                  'Reaction-only engagement; no comment evidence of buying intent.')
 
             eng = max(1, int(e.get("engagement_count") or 1))
             rank_score = fit * (1 + math.log(eng)) * INTENT_WEIGHT[intent]
@@ -311,9 +328,13 @@ def main() -> None:
                 "company_source": "profile" if e.get("company") else ("headline" if r.get("company_guess") else ""),
                 "location": e.get("location") or "",
                 "icp_fit": fit,
+                "qualification_threshold": args.min_fit,
+                "qualification_status": "qualified" if fit >= args.min_fit else "rejected",
+                "qualification_reason": r['qualification_reason'],
                 "engagement_count": eng,
                 "reaction_types": ",".join(e.get("reaction_types") or []),
                 "intent": intent,
+                "intent_reason": r['intent_reason'],
                 "rank_score": round(rank_score, 4),
                 "linkedin_url": e.get("linkedinUrl") or "",
                 "comment_excerpt": excerpt,
@@ -330,7 +351,7 @@ def main() -> None:
 
     out_path = base / "ranked_engagers.csv"
     cols = ["rank", "name", "clean_title", "company_guess", "location", "icp_fit",
-            "engagement_count", "reaction_types", "intent", "rank_score",
+            "qualification_threshold", "qualification_status", "qualification_reason", "engagement_count", "reaction_types", "intent", "intent_reason", "rank_score",
             "linkedin_url", "comment_excerpt", "actor_id", "source_profile", "post_ids", "post_urls", "resolve_status",
             "comment_post_url", "company_source"]
     write_csv(out_path, rows, cols)

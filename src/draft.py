@@ -127,7 +127,8 @@ def main() -> None:
             post_ids = []
         todo.append({**r, "template": t, "topic": post_topic(post_ids, posts)})
     fields = ["rank", "name", "clean_title", "company_guess", "icp_fit", "intent", "template",
-              "topic", "comment_excerpt", "connection_note", "dm", "linkedin_url"]
+              "topic", "comment_excerpt", "connection_note", "dm", "linkedin_url", "qualification_threshold", "qualification_status",
+              "qualification_reason", "intent_reason", "eligibility_reason"]
     out = base / "drafts.csv"
     if not todo:  # a normal outcome for many audiences: leave an empty file, not a stale one, and carry on
         write_csv(out, [], fields)

@@ -67,6 +67,12 @@ def summarize(rows, top=20, min_fit=4):
         if 'email_status' in cols:
             line += f" {(r.get('email_status') or '')[:11]:<11}"
         lines.append(line)
+        if r.get('qualification_reason'):
+            lines.append(f"    ICP ({r.get('qualification_status') or ('qualified' if fit(r) >= min_fit else 'rejected')}): {r['qualification_reason']}")
+        if r.get('activity_reason'):
+            lines.append(f"    Activity: {r['activity_reason']}")
+        if r.get('ledger_status') and r['ledger_status'] != 'eligible' and r.get('eligibility_reason'):
+            lines.append(f"    Eligibility: {r['eligibility_reason']}")
     if 'icp_fit' in cols and len(qual) > len([r for r in show if fit(r) >= min_fit]):
         rest = [r for r in ranked[top:] if fit(r) >= min_fit]
         lines.append(f"\n{len(rest)} more qualified not shown: " + ", ".join((r.get('name') or '?') for r in rest))
