@@ -7,41 +7,56 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
 ## How it works
 
 ```
- Competitor's LinkedIn profile
+ Competitor's LinkedIn profile        ─ or ─        one post link (--post, lnkd.in works)
             │
             ▼
- 1. Harvest      Pull their recent posts + everyone who reacted or commented   (Apify)
+ 1. Harvest      Everyone who reacted or commented, with their headline        (Apify)
+                 (post mode also returns each person's location + employer)
             │
             ▼
  2. Load ICP     Read who you sell to from icp.yaml                             (you)
             │
             ▼
- 3. Score        Rate every engager 1–5 on ICP fit + read comments for intent   (OpenAI or Claude)
+ 3. Score        Rate every engager 1–5 on ICP fit + read comments for intent
+                 (Claude in-session, or automatically via OpenAI / claude CLI)
             │
             ▼
- 4. Rank         Sort by fit × how often they engaged × buying intent           ──▶  ranked_engagers.csv
+ 4. Profile      Look up hidden profile ids of fit-3+ candidates: public URL,   (Apify)
+    pass         location, employer. Rescore those rows so geography and
+                 employer rules count. Already-paid lookups are reused.
             │
-            ▼  (optional)
- 5. Draft        Connection note + DM per qualified lead, one playbook template each ──▶  drafts.csv
- 6. Enrich       Find verified work emails                                      (Prospeo)
- 7. Push         Stage a Smartlead (email) or HeyReach (LinkedIn) import;    (Smartlead / HeyReach)
+            ▼
+ 5. Rank         Qualified (fit 4–5) first, then fit × engagement × intent    ──▶  ranked_engagers.csv
+                                                                                    resolved.csv
+            │
+            ▼  (optional flags)
+ 6. Activity     Is each qualified lead active on LinkedIn right now?           ──▶  activity.csv
+ 7. Draft        Connection note + DM per qualified lead, one playbook template ──▶  drafts.csv
+ 8. Emails       Find verified work emails                                      ──▶  enriched.csv
+ 9. Push         Stage a Smartlead (email) or HeyReach (LinkedIn) import;    (Smartlead / HeyReach)
                  you approve before anything sends
+            │
+            ▼
+ Summary         Counts + the top leads by name, printed at the end of every run
 ```
 
-Steps 1 to 4 are the core and steps 5 to 7 are opt-in flags. Two more stages sit between them: qualified reactors with hidden profile ids are resolved to public URLs automatically, and `--activity` can check who is actually active on LinkedIn (see "Also in the box").
+Steps 1 to 5 always run. Steps 6 to 9 are opt-in flags (`--activity`, `--draft`, `--find-emails`, `--campaign-id` / `--heyreach-list-id`). Nothing sends without a separate `--execute`.
 
 ## What you get
 
-A CSV with one row per engager, best leads first. The columns that matter:
+A CSV with one row per engager, qualified leads first, plus a summary with names printed in your terminal or chat. The final file is the last stage you ran: `resolved.csv`, then `activity.csv`, then `enriched.csv`. The columns that matter:
 
 | column | meaning |
 |---|---|
-| `icp_fit` | 1 to 5. How well their headline matches your ICP. 4 and 5 are qualified. |
+| `icp_fit` | 1 to 5. How well they match your ICP, using headline, location and employer when known. 4 and 5 are qualified and always sort first. |
 | `intent` | `high`, `medium`, or `low`. From their comment if they left one; reactions alone are always `low`. |
 | `engagement_count` | How many of the competitor's posts they touched. Repeat engagers rank higher. |
-| `rank_score` | The sort key. Fit, engagement, and intent combined. |
+| `rank_score` | Fit, engagement and intent combined. Orders leads within the qualified group and within the rest. |
 | `comment_excerpt` | What they said, so your first message can reference it. |
-| `linkedin_url`, `company_guess`, `clean_title` | Who they are. |
+| `linkedin_url`, `company_guess`, `clean_title`, `location` | Who they are. |
+| `resolve_status` | `resolved` when a hidden profile id was looked up to a public URL. |
+| `linkedin_outreach_ready`, `outreach_ready_probability`, `outreach_reason`, `activity_status` | With `--activity`: are they active on LinkedIn now, and why. |
+| `email`, `email_status`, `sendable` | With `--find-emails`: a verified work email when Prospeo has one. |
 
 See [examples/ranked_engagers.sample.csv](examples/ranked_engagers.sample.csv) for a full sample.
 
@@ -124,20 +139,25 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 ## Repo map
 
 ```
-run.py            one command that runs the whole pipeline
-setup_icp.py      interactive ICP intake -> icp.yaml
-src/harvest.py    Apify: posts + engagers
-src/icp.py        load icp.yaml (or infer an ICP from a website with --domain)
-src/rank.py       LLM scoring + ranking; the scoring prompt lives here
-src/draft.py      outreach drafts from playbook templates
+run.py                one command that runs the whole pipeline
+setup_icp.py          interactive ICP intake -> icp.yaml
+src/harvest.py        Apify: a profile's posts + engagers, or one post (--post)
+src/icp.py            load icp.yaml (or infer an ICP from a website with --domain)
+src/rank.py           scoring + qualified-first ranking; --dump / --scores for in-session scoring
+src/resolve.py        hidden profile ids -> public URL, location, employer
+src/activity.py       LinkedIn activity check (wraps src/activity_intel.py, vendored)
+src/draft.py          outreach drafts from playbook templates
 src/email_enrich.py   Prospeo
 src/push_heyreach.py  HeyReach list/campaign push (LinkedIn)
-src/push.py       Smartlead preview / import
-src/common.py     shared helpers, including the OpenAI-or-Claude switch
+src/push.py           Smartlead preview / import
+src/summary.py        the end-of-run summary with names
+src/common.py         shared helpers, including the OpenAI-or-Claude switch
+activity.toml         activity-check caps, threshold and question wording (yours to tune)
+.claude/commands/     /setup, /first-run, /weekly-sweep for Claude Code
 docs/OPERATIONS.md    full command reference and every caveat
-docs/SCHEMAS.md   Apify actor input/output shapes
-playbooks/        outreach copy and positioning
-tests/            mocked, no API spend: uv run python -m unittest discover -s tests
+docs/SCHEMAS.md       Apify actor input/output shapes
+playbooks/            outreach copy and positioning
+tests/                mocked, no API spend: uv run python -m unittest discover -s tests
 ```
 
 ## Credits

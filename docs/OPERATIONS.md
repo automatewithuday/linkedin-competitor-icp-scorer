@@ -68,7 +68,10 @@ Outputs in `output/competitor-2026-09-16/`:
 
 - `posts.json`, `engagers.json`: source evidence and deduplicated engagers.
 - `recipient_icp.json`: criteria used for scoring.
-- `ranked_engagers.csv`: everyone, including low-fit leads, source profile and post references.
+- `scores.json`, `rescore.json`: in-session judgments, and the rows to rescore after the profile pass.
+- `ranked_engagers.csv`: everyone, including low-fit leads, qualified first, with source profile and post references.
+- `resolved.csv`: the ranked rows with hidden profile ids resolved (`resolve_status`, `location`).
+- `activity.csv` and `activity/`: with `--activity`, LinkedIn activity verdicts plus the full per-profile output and raw cache.
 - `enriched.csv`: all rows with email verification fields and a `miss_reason` for every skipped/unresolved row.
 - `enriched.prospeo-cache.json`: checkpointed enrichment results, reusable for 30 days.
 
