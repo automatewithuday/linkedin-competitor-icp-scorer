@@ -34,9 +34,19 @@ def summarize(rows, top=20, min_fit=4):
         lines.append(f"Email: sendable {sum(r.get('sendable') == 'true' for r in rows)}; "
                      f"status {dict(Counter(r.get('email_status') or '' for r in rows))}; "
                      f"miss reasons {dict(Counter(r['miss_reason'] for r in rows if r.get('miss_reason')))}")
-    ranked = sorted(rows, key=lambda r: float(r.get('rank_score') or 0), reverse=True) if 'rank_score' in cols else rows
+    if 'rank' in cols:  # rank.py order: qualified first, then rank_score
+        ranked = sorted(rows, key=lambda r: int(r.get('rank') or 10**9))
+    elif 'rank_score' in cols:
+        ranked = sorted(rows, key=lambda r: (fit(r) >= min_fit, float(r.get('rank_score') or 0)), reverse=True)
+    else:
+        ranked = rows
+    if 'icp_fit' in cols and 'intent' in cols:
+        strong = [r for r in rows if fit(r) < min_fit and r.get('intent') in ('high', 'medium') and r.get('comment_excerpt')]
+        if strong:
+            lines.append(f"Strong comments below the fit bar (referral/intro value, not outreach slots): "
+                         + ", ".join(f"{r.get('name') or '?'} ({r.get('intent')})" for r in strong))
     show = ranked[:top]
-    head = f"\nTop {len(show)} by rank score:" if 'rank_score' in cols else f"\nFirst {len(show)} rows:"
+    head = f"\nTop {len(show)} (qualified first, then rank score):" if 'icp_fit' in cols else f"\nFirst {len(show)} rows:"
     lines.append(head)
     hdr = f"{'#':>3} {'name':<24} {'title':<34} {'company':<18} {'fit':>3} {'intent':<6}"
     if 'activity_status' in cols:

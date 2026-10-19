@@ -125,6 +125,12 @@ Rows are upserted into `warm_lead_snapshots` on `(run_id, lead_key)`. Retrying t
 
 RLS is enabled and public roles have no access. Use the secret key only server-side. Export is chunked, not transactional across batches: after a failure, rerun with the same run ID. Identity can change if an opaque actor later gains a public URL; automatic identity reconciliation is not implemented. Snapshots are observations, not a CRM lifecycle table.
 
+## Ranking
+
+`ranked_engagers.csv` is ordered qualified-first: every row at or above `--min-fit` comes before every row below it, and `rank_score` (fit x engagement x intent) orders within each group. A strong comment from someone outside the ICP therefore never takes an outreach slot from a buyer. The summary lists those commenters separately as referral or introduction leads.
+
+Inside Claude Code (`CLAUDECODE=1`), `run.py` and `rank.py` refuse to score automatically unless `LLM_PROVIDER` is set in `.env`; the agent scores in-session and passes `--scores`. Outside Claude Code, OpenAI or the `claude` CLI is used automatically as before.
+
 ## Rerun individual stages
 
 ```bash
@@ -191,7 +197,8 @@ Reaction items, and every engager from a `--profile` harvest, often carry only L
 On the Apify free plan HarvestAPI's profile scraper accepts at most 10 ids per run and returns an error item for larger runs (the rows get `resolve_status=error`). `resolve.py --batch-size 10` (or `run.py --resolve-batch 10`) splits the ids into runs of 10. That paces around a provider limit, so it is off unless you pass it.
 
 - `--post` harvests ask the post actors for `profileScraperMode: "main"`, so nearly every engager arrives with a vanity URL, `location` and current `company` (+$0.002 per engager on top of $0.002 per reaction/comment; the spend cap includes it). Location and company also reach the scorer (`rank.py --dump`). `--profile` harvests cannot do this: that actor has no profile mode.
-- After ranking, `run.py` runs `src/resolve.py` by default: one `harvestapi/linkedin-profile-scraper` run over the qualified (`icp_fit >= --min-fit`) rows that still have an opaque ID, at $0.004 per profile (hard cap = estimate x 1.25 + $0.05). It writes `resolved.csv` with the vanity `linkedin_url`, `location` when empty, and `resolve_status`: `resolved`, `not_found` (sent, nothing returned), `skipped` (below min fit, already public, or no ID), `error` (run failed or the provider returned an error item; the other rows carry on). Pass `--no-resolve` to skip it.
+- Two-pass scoring (default): after the first scoring pass, `run.py` resolves opaque engagers at `icp_fit >= --min-fit - 1` (3 by default) with `src/resolve.py --slug <slug>`, reusing anything already in `resolved.csv`, and writes their public URL, `location` and `company` into `engagers.json`. With an automatic scorer it then rescores everything on its own. With `--scores` it stops, lists the indices that gained profile data (also in `output/<slug>/rescore.json`), and asks for those rows to be rescored before continuing; the next run sends nothing already resolved. This is what lets geo and employer rules apply to profile harvests: on a real 151-engager run it cost $0.12 and moved 10 of 53 candidates (4 up, 6 down on geography).
+- After ranking, `run.py` also runs `src/resolve.py` by default as a safety net: one `harvestapi/linkedin-profile-scraper` run over the qualified (`icp_fit >= --min-fit`) rows that still have an opaque ID, at $0.004 per profile (hard cap = estimate x 1.25 + $0.05). It writes `resolved.csv` with the vanity `linkedin_url`, `location` when empty, and `resolve_status`: `resolved`, `not_found` (sent, nothing returned), `skipped` (below min fit, already public, or no ID), `error` (run failed or the provider returned an error item; the other rows carry on). Pass `--no-resolve` to skip it.
 
 On a free Apify plan HarvestAPI limits this actor to 10 items per run: a larger run scrapes nothing, returns one error item, and every sent row becomes `error`. Pass `--resolve-batch 10` (or `resolve.py --batch-size 10`), upgrade the plan, or lower the count (for example `--min-fit 5`). Rerunning reuses rows already marked `resolved` in the existing `resolved.csv`, so a rescore never pays for the same profile twice.
 

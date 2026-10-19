@@ -121,6 +121,17 @@ def llm_provider():
     return None
 
 
+def in_session_guard():
+    """Inside Claude Code (CLAUDECODE=1) the agent scores in-session with full context. Automatic scoring there
+    must be chosen explicitly via LLM_PROVIDER; otherwise llm_provider() would silently pick the claude CLI.
+    Returns the refusal message, or None when automatic scoring is fine."""
+    if os.getenv('CLAUDECODE') and not (os.getenv('LLM_PROVIDER') or '').strip():
+        return ('Inside Claude Code the agent scores in-session: run `src/rank.py --dump --slug <slug>`, judge every '
+                'engager, write output/<slug>/scores.json and pass --scores. To let the pipeline score on its own '
+                'instead, set LLM_PROVIDER=openai or LLM_PROVIDER=claude in .env.')
+    return None
+
+
 def llm_json(system, user, model=None):
     """Ask the configured LLM for a JSON object. Returns (parsed_dict, input_tokens, output_tokens)."""
     provider = llm_provider()

@@ -24,9 +24,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import write_csv, llm_json, llm_provider
+    from .common import in_session_guard, write_csv, llm_json, llm_provider
 except ImportError:
-    from common import write_csv, llm_json, llm_provider
+    from common import in_session_guard, write_csv, llm_json, llm_provider
 
 load_dotenv()
 
@@ -185,6 +185,8 @@ def main() -> None:
     ap.add_argument("--output-dir", default="./output", help="Base output directory")
     ap.add_argument("--scores", metavar="PATH", help="JSON judgments from Claude/human instead of OpenAI (see module doc)")
     ap.add_argument("--dump", action="store_true", help="Print the numbered engager list to score, then exit")
+    ap.add_argument("--min-fit", type=int, choices=range(1, 6), default=4,
+                    help="Qualification bar: rows at or above it always rank above rows below it")
     args = ap.parse_args()
 
     engagers, icp, base = load_inputs(args.slug, args.output_dir)
@@ -201,6 +203,9 @@ def main() -> None:
         scored = [(engagers, results_all)]
         print(f"[{args.slug}] using {n} judgments from {args.scores} (no OpenAI call)")
     else:
+        guard = in_session_guard()
+        if guard:
+            sys.exit(guard)
         provider = llm_provider()
         if not provider:
             sys.exit("No scorer: pass --scores PATH (judgments made in-session), set OPENAI_API_KEY, "
@@ -253,9 +258,11 @@ def main() -> None:
                 "rank_score": round(rank_score, 4),
                 "linkedin_url": e.get("linkedinUrl") or "",
                 "comment_excerpt": excerpt,
+                "resolve_status": e.get("resolve_status") or "",  # set when resolved before final scoring
             })
 
-    rows.sort(key=lambda x: x["rank_score"], reverse=True)
+    # Qualified rows first, then by rank_score: a strong comment from a non-buyer never outranks a buyer.
+    rows.sort(key=lambda x: (x["icp_fit"] >= args.min_fit, x["rank_score"]), reverse=True)
     for i, row in enumerate(rows, 1):
         row_rank = {"rank": i}
         row_rank.update(row)
@@ -264,15 +271,15 @@ def main() -> None:
     out_path = base / "ranked_engagers.csv"
     cols = ["rank", "name", "clean_title", "company_guess", "location", "icp_fit",
             "engagement_count", "reaction_types", "intent", "rank_score",
-            "linkedin_url", "comment_excerpt", "actor_id", "source_profile", "post_ids", "post_urls"]
+            "linkedin_url", "comment_excerpt", "actor_id", "source_profile", "post_ids", "post_urls", "resolve_status"]
     write_csv(out_path, rows, cols)
 
-    qualified = [r for r in rows if r["icp_fit"] >= 4]
+    qualified = [r for r in rows if r["icp_fit"] >= args.min_fit]
     high_intent = [r for r in rows if r["intent"] == "high"]
 
     print("=== RANKED ===")
     print(f"  total scored   : {len(rows)}")
-    print(f"  qualified (>=4): {len(qualified)}")
+    print(f"  qualified (>={args.min_fit}): {len(qualified)}")
     print(f"  high-intent    : {len(high_intent)}")
     print(f"  tokens in/out  : {in_tok}/{out_tok}")
     print(f"  -> {out_path}")

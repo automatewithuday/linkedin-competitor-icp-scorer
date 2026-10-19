@@ -496,3 +496,64 @@ class NewUserRegressionTests(unittest.TestCase):
 
     def test_scoring_prompt_sentences_are_terminated(self):
         self.assertNotIn('use it Be honest', rank.SYSTEM)
+
+
+class LockedVersionTests(unittest.TestCase):
+    def test_in_session_guard(self):
+        with patch.dict('os.environ', {'CLAUDECODE': '1', 'LLM_PROVIDER': ''}):
+            self.assertIn('--scores', common.in_session_guard())
+        with patch.dict('os.environ', {'CLAUDECODE': '1', 'LLM_PROVIDER': 'claude'}):
+            self.assertIsNone(common.in_session_guard())
+        with patch.dict('os.environ', {'CLAUDECODE': '', 'LLM_PROVIDER': ''}):
+            self.assertIsNone(common.in_session_guard())
+
+    @patch('src.rank.score_batch')
+    def test_rank_refuses_silent_llm_inside_claude_code(self, score_batch):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            (base / 'engagers.json').write_text('[{"id": "A", "name": "J"}]'); (base / 'recipient_icp.json').write_text('{}')
+            with patch.dict('os.environ', {'CLAUDECODE': '1', 'LLM_PROVIDER': '', 'OPENAI_API_KEY': 'k'}), \
+                 patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d]), self.assertRaises(SystemExit):
+                rank.main()
+        score_batch.assert_not_called()
+
+    def test_qualified_rows_always_rank_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            (base / 'engagers.json').write_text(json.dumps([
+                {'id': 'A', 'name': 'Commenter', 'engagement_count': 3, 'comments': ['we need this now']},
+                {'id': 'B', 'name': 'Buyer', 'engagement_count': 1, 'reaction_types': ['LIKE']}]))
+            (base / 'recipient_icp.json').write_text('{}')
+            scores = Path(d) / 'scores.json'
+            scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 2, 'intent': 'high'}, {'i': 1, 'icp_fit': 4, 'intent': None}]}))
+            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+                rank.main()
+            rows, _ = common.read_csv(base / 'ranked_engagers.csv')
+        self.assertEqual([r['name'] for r in rows], ['Buyer', 'Commenter'])  # 2*(1+ln3)*1.0 > 4*0.3, still second
+        text = '\n'.join(summary.summarize(rows))
+        self.assertIn('Strong comments below the fit bar', text)
+        self.assertLess(text.index('Buyer'), text.index('  2 Commenter'))
+
+    @patch('src.resolve.scrape')
+    def test_pre_scoring_enrichment_writes_profile_data_once(self, scrape):
+        from src import resolve
+        scrape.return_value = ({'ACoAA3': {'id': 'ACoAA3', 'publicIdentifier': 'jane', 'location': {'linkedinText': 'London'},
+                                           'currentPosition': [{'companyName': 'Acme'}]}}, True)
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            eng = [{'id': 'ACoAA3', 'name': 'Jane', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA3'},
+                   {'id': 'ACoAA2', 'name': 'Low', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA2'},
+                   {'id': 'ACoAA9', 'name': 'Gone', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA9'}]
+            (base / 'engagers.json').write_text(json.dumps(eng))
+            common.write_csv(base / 'ranked_engagers.csv', [{'actor_id': 'ACoAA3', 'icp_fit': '3'},
+                             {'actor_id': 'ACoAA2', 'icp_fit': '2'}, {'actor_id': 'ACoAA9', 'icp_fit': '4'}], ['actor_id', 'icp_fit'])
+            self.assertEqual(resolve.enrich_harvest(base, 3), [0])
+            self.assertEqual(sorted(scrape.call_args.args[0]), ['ACoAA3', 'ACoAA9'])  # fit 2 never sent
+            out = json.loads((base / 'engagers.json').read_text())
+            self.assertEqual((out[0]['linkedinUrl'], out[0]['location'], out[0]['company']),
+                             ('https://www.linkedin.com/in/jane', 'London', 'Acme'))
+            self.assertEqual(out[2]['resolve_status'], 'not_found')
+            self.assertEqual(json.loads((base / 'rescore.json').read_text())['indices'], [0])
+            scrape.reset_mock()
+            self.assertEqual(resolve.enrich_harvest(base, 3), [])  # rerun: resolved and not_found are not paid again
+            scrape.assert_not_called()

@@ -9,10 +9,11 @@ Scoring: pass --scores (judgments made in-session; see src/rank.py --dump), or l
 OPENAI_API_KEY, else the `claude` CLI when installed (LLM_PROVIDER forces one).
 """
 import argparse
+import json
 import os
 import re
 from dotenv import load_dotenv
-from src.common import linkedin_url, llm_provider
+from src.common import in_session_guard, linkedin_url, llm_provider
 import subprocess
 import sys
 from pathlib import Path
@@ -84,6 +85,8 @@ def main() -> None:
     if args.campaign_id is not None and (args.campaign_id < 1 or not args.find_emails):
         ap.error("--campaign-id must be positive and requires --find-emails")
     required = []
+    if not args.scores and in_session_guard():
+        sys.exit(in_session_guard())
     if not args.scores and not llm_provider():
         sys.exit('No LLM for scoring: pass --scores (judgments made in-session), set OPENAI_API_KEY in .env, '
                  'or install the `claude` CLI and log in to your Claude subscription (LLM_PROVIDER=claude).')
@@ -156,10 +159,29 @@ def main() -> None:
         py, "src/rank.py",
         "--slug", slug,
         "--output-dir", out,
+        "--min-fit", str(args.min_fit),
     ]
     if args.scores:
         rank_cmd += ["--scores", args.scores]
     run_step("Score + rank engagers" + (" (in-session judgments)" if args.scores else f" ({llm_provider()})"), rank_cmd)
+
+    # Step 4b: two-pass scoring. Profile harvests carry no location/company for reactors; resolve the borderline-and-up
+    # candidates (fit >= min_fit - 1) so the final scoring can apply geo and employer rules.
+    batch = ["--batch-size", str(args.resolve_batch)] if args.resolve_batch else []
+    if not args.no_resolve:
+        rescore = Path(out) / slug / "rescore.json"
+        before = rescore.stat().st_mtime if rescore.exists() else None
+        run_step("Resolve candidates before final scoring", [py, "src/resolve.py", "--slug", slug, "--output-dir", out,
+                 "--min-fit", str(max(1, args.min_fit - 1))] + batch)
+        fresh = rescore.exists() and rescore.stat().st_mtime != before
+        if args.scores and rescore.exists() and rescore.stat().st_mtime > Path(args.scores).stat().st_mtime:
+            todo = json.loads(rescore.read_text(encoding="utf-8"))
+            sys.exit(f"\n{len(todo['indices'])} candidates gained location/company after scoring: "
+                     f"{', '.join(n or '?' for n in todo['names'])}.\n"
+                     f"Rescore engager indices {todo['indices']} with `uv run src/rank.py --dump --slug {slug}`, "
+                     f"update {args.scores}, then rerun this command (already-resolved profiles are not paid again).")
+        if fresh and not args.scores:
+            run_step("Rescore with profile data", rank_cmd)
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
     final_csv = out_csv
@@ -169,8 +191,7 @@ def main() -> None:
     if not args.no_resolve:
         final_csv = out_csv.with_name("resolved.csv")
         run_step("Resolve opaque profile IDs", [py, "src/resolve.py", "--input", str(out_csv),
-                 "--output", str(final_csv), "--min-fit", str(args.min_fit)]
-                 + (["--batch-size", str(args.resolve_batch)] if args.resolve_batch else []))
+                 "--output", str(final_csv), "--min-fit", str(args.min_fit)] + batch)
     if args.activity:
         activity_csv = out_csv.with_name("activity.csv")
         run_step("LinkedIn activity intel", [py, "src/activity.py", "--input", str(final_csv),

@@ -115,7 +115,7 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 | what | cost |
 |---|---|
 | Apify harvest | profile mode: about $0.002 per item. 3 posts with small caps is under $0.20; 10 posts at default caps is $2 to $3. Single post (`--post`): about $0.004 per engager, full profiles included. |
-| Resolve hidden profile ids | $0.004 per qualified reactor with an opaque id; on by default, `--no-resolve` skips it. Reruns reuse earlier results. |
+| Resolve hidden profile ids | $0.004 per candidate (fit 3+) with an opaque id, resolved before final scoring so location counts; on by default, `--no-resolve` skips it. Reruns reuse earlier results. |
 | Activity check (`--activity`) | about $0.04 per qualified profile (Apify) plus a negligible TypeSafe charge. |
 | Scoring with OpenAI | under one cent per 100 engagers on `gpt-4.1-mini`. |
 | Scoring with Claude subscription | no dollars; counts against your plan's usage limits. |

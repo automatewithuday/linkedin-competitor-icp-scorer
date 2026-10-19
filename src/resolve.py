@@ -3,17 +3,25 @@
 Profile-mode harvests (and short-mode reactions) only carry LinkedIn's opaque profile id, which email enrichment,
 the activity check and Smartlead cannot use. One actor run over the qualified ids, $0.004 per profile.
 Adds `resolve_status`: resolved | not_found | skipped | error. Never fails the pipeline on a provider error.
+
+--slug mode (before final scoring): resolves opaque engagers whose first-pass fit is >= --min-fit (run.py uses
+min_fit - 1) and writes the public URL, location and company into engagers.json, so the final scoring can apply
+geo and employer rules. Engagers that changed are listed in rescore.json for a second scoring pass.
 """
 import argparse
+import json
 import os
 import sys
 from collections import Counter
+from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import fit, linkedin_url, location_text, read_csv, write_csv
+    from .common import fit, linkedin_url, location_text, read_csv, write_csv, write_json
+    from .harvest import profile_fields
 except ImportError:
-    from common import fit, linkedin_url, location_text, read_csv, write_csv
+    from common import fit, linkedin_url, location_text, read_csv, write_csv, write_json
+    from harvest import profile_fields
 
 ACTOR = 'harvestapi/linkedin-profile-scraper'
 MODE = 'Profile details no email ($4 per 1k)'
@@ -67,16 +75,79 @@ def scrape(ids, token, batch_size=0):
     return found, ok
 
 
+def enrich_harvest(base, min_fit, batch_size=0, dry_run=False):
+    """Pre-scoring pass over output/<slug>/: resolve opaque engagers with first-pass fit >= min_fit (fits read from
+    ranked_engagers.csv by actor_id) and write url/location/company into engagers.json in place. Engager order is
+    untouched, so scores.json indices stay valid. Returns the indices that changed (also written to rescore.json)."""
+    base = Path(base)
+    engagers = json.loads((base / 'engagers.json').read_text(encoding='utf-8'))
+    fits = {r.get('actor_id'): fit(r) for r in read_csv(base / 'ranked_engagers.csv')[0]}
+    changed = []
+    if (base / 'resolved.csv').exists():  # profiles a post-rank resolve already paid for
+        paid = {r['actor_id']: r for r in read_csv(base / 'resolved.csv')[0] if r.get('resolve_status') == 'resolved'}
+        for i, e in enumerate(engagers):
+            hit = paid.get(e.get('id'))
+            if hit and not linkedin_url(e.get('linkedinUrl')) and linkedin_url(hit.get('linkedin_url')):
+                e['linkedinUrl'], e['resolve_status'] = linkedin_url(hit['linkedin_url']), 'resolved'
+                e['location'] = e.get('location') or hit.get('location', '')
+                changed.append(i)
+        if changed:
+            print(f'Reused {len(changed)} profiles already resolved in resolved.csv', file=sys.stderr)
+    todo = [i for i, e in enumerate(engagers)
+            if fits.get(e.get('id'), 0) >= min_fit and not linkedin_url(e.get('linkedinUrl'))
+            and (e.get('id') or '').startswith('ACoAA') and e.get('resolve_status') != 'not_found']
+    ids = list(dict.fromkeys(engagers[i]['id'] for i in todo))
+    print(f'Pre-scoring candidates (first-pass fit>={min_fit}, opaque): {len(ids)}; estimate ${len(ids) * PROFILE_USD:.3f}; '
+          f'hard cap ${cap(len(ids)):.2f}' if ids else f'Pre-scoring candidates (first-pass fit>={min_fit}): none to resolve',
+          file=sys.stderr)
+    found, ok = {}, False
+    if ids and not dry_run:
+        token = os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')
+        try:
+            if not token:
+                raise RuntimeError('APIFY_TOKEN is not set')
+            found, ok = scrape(ids, token, batch_size)
+        except Exception as exc:  # the post-rank resolve retries qualified rows; scoring carries on without location
+            print(f'Pre-scoring resolve failed ({type(exc).__name__}); continuing without it', file=sys.stderr)
+    if dry_run or not (changed or found):
+        return []
+    for i in todo:
+        e, hit = engagers[i], found.get(engagers[i]['id'])
+        url, location, company = profile_fields(hit) if hit else ('', '', '')
+        if linkedin_url(url):
+            e['linkedinUrl'] = linkedin_url(url)
+            e['location'] = e.get('location') or location
+            e['company'] = e.get('company') or company
+            e['resolve_status'] = 'resolved'
+            changed.append(i)
+        elif ok:  # complete run, id absent: do not pay for it again on the next run
+            e['resolve_status'] = 'not_found'
+    write_json(base / 'engagers.json', engagers)
+    if changed:
+        write_json(base / 'rescore.json', {
+            'indices': changed, 'names': [engagers[i].get('name') for i in changed],
+            'why': 'location/company arrived after the first scoring pass; rescore these indices'})
+    print(f'Pre-scoring resolve: sent {len(ids)}; gained profile data: {len(changed)}', file=sys.stderr)
+    return changed
+
+
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--input', required=True)
-    ap.add_argument('--output', required=True)
+    ap.add_argument('--input', help='ranked CSV (post-rank mode)')
+    ap.add_argument('--output', help='resolved CSV to write (post-rank mode)')
+    ap.add_argument('--slug', help='pre-scoring mode: enrich output/<slug>/engagers.json instead of a CSV')
+    ap.add_argument('--output-dir', default='./output')
     ap.add_argument('--min-fit', type=int, choices=range(1, 6), default=4)
     ap.add_argument('--dry-run', action='store_true', help='print id count, estimate and hard cap; spend nothing')
     ap.add_argument('--batch-size', type=int, default=0,
                     help='ids per actor run (0 = one run). The Apify free plan allows 10 per run on this actor')
     args = ap.parse_args()
+    if args.slug:
+        enrich_harvest(Path(args.output_dir) / args.slug, args.min_fit, args.batch_size, args.dry_run)
+        return
+    if not (args.input and args.output):
+        ap.error('pass --slug (pre-scoring) or both --input and --output (post-rank)')
     rows, fields = read_csv(args.input)
     prior = {}  # actor_id -> earlier resolved row; a rerun after rescoring must not pay twice
     if os.path.exists(args.output):
@@ -87,7 +158,7 @@ def main():
         if hit and opaque_id(row):
             row['linkedin_url'], row['resolve_status'] = hit['linkedin_url'], 'resolved'
             row['location'] = row.get('location') or hit.get('location', '')
-    if prior:
+    if any(r.get('resolve_status') == 'resolved' for r in rows if prior.get(r.get('actor_id'))):
         print(f'Reusing {sum(r.get("resolve_status") == "resolved" for r in rows)} earlier resolved rows from {args.output}',
               file=sys.stderr)
     ids = list(dict.fromkeys(i for i in (opaque_id(r) for r in rows if fit(r) >= args.min_fit) if i))
