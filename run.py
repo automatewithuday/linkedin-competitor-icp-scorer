@@ -52,6 +52,8 @@ def main() -> None:
     ap.add_argument("--posted-limit", choices=["24h", "week", "month"], default="month")
     ap.add_argument("--find-emails", action="store_true", help="Enrich qualified leads with Prospeo")
     ap.add_argument("--min-fit", type=int, choices=range(1, 6), default=4)
+    ap.add_argument('--getleads', action='store_true', help='Fill missing ICP evidence for borderline-and-up candidates with GetLeads plan credits')
+    ap.add_argument('--getleads-max-lookups', type=int, default=100, help='GetLeads submission cap per slug, including retries (default 100)')
     ap.add_argument("--max-lookups", type=int, default=100)
     ap.add_argument("--draft", action="store_true",
                     help="Draft connection note + DM per qualified row using playbooks/copy-templates.md")
@@ -80,7 +82,7 @@ def main() -> None:
         ap.error("one of --profile, --post or --skip-harvest is required")
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.slug):
         ap.error("Slug must contain only letters, digits, underscores and hyphens")
-    if min(args.max_posts, args.max_reactions, args.max_comments) < 0 or args.max_lookups < 1:
+    if min(args.max_posts, args.max_reactions, args.max_comments) < 0 or min(args.max_lookups, args.getleads_max_lookups) < 1:
         ap.error("Invalid scrape or lookup limits")
     if args.campaign_id is not None and (args.campaign_id < 1 or not args.find_emails):
         ap.error("--campaign-id must be positive and requires --find-emails")
@@ -94,6 +96,8 @@ def main() -> None:
         required.append('APIFY_TOKEN')
     if args.find_emails:
         required.append('PROSPEO_API_KEY')
+    if args.getleads:
+        required.append('GETLEADS_API_KEY')
     if args.supabase:
         required.append('SUPABASE_URL')
         if not (os.getenv('SUPABASE_SECRET_KEY') or os.getenv('SUPABASE_SERVICE_ROLE_KEY')):
@@ -176,6 +180,10 @@ def main() -> None:
         # activity/email/exports scored without its profile evidence; paid results are kept for the rerun.
         run_step("Profile lookups before final scoring", [py, "src/resolve.py", "--slug", slug, "--output-dir", out,
                  "--min-fit", str(max(1, args.min_fit - 1))] + batch + (["--scores", args.scores] if args.scores else []))
+    if args.getleads:
+        run_step('GetLeads ICP evidence', [py, 'src/getleads.py', '--slug', slug, '--output-dir', out,
+                 '--min-fit', str(max(1, args.min_fit - 1)), '--max-lookups', str(args.getleads_max_lookups)])
+    if not args.no_resolve or args.getleads:
         with ledger.connect() as con:
             pending = ledger.pending_scores(con, Path(out) / slug)
         if args.scores and pending:
@@ -183,7 +191,7 @@ def main() -> None:
                      f"{', '.join(name for _, name in pending)}.\n"
                      f"Rescore engager indices {[i for i, _ in pending]} with `uv run src/rank.py --dump --slug {slug}`, "
                      f"update {args.scores}, then rerun this command (already-resolved profiles are not paid again).")
-        if pending and not args.scores:
+        if (pending and not args.scores) or (args.getleads and not pending):
             run_step("Rescore with profile data", rank_cmd)
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"

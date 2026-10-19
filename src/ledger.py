@@ -55,6 +55,11 @@ CREATE TABLE IF NOT EXISTS profile_snapshots (id INTEGER PRIMARY KEY, contact_id
     location TEXT, company TEXT, source TEXT, hash TEXT, taken_at TEXT);
 CREATE TABLE IF NOT EXISTS lookups (opaque_id TEXT PRIMARY KEY, status TEXT NOT NULL, public_url TEXT,
     run_id TEXT, checked_at TEXT);
+CREATE TABLE IF NOT EXISTS provider_enrichments (provider TEXT NOT NULL, identity TEXT NOT NULL,
+    status TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', checked_at TEXT NOT NULL,
+    PRIMARY KEY (provider, identity));
+CREATE TABLE IF NOT EXISTS enrichment_attempts (id INTEGER PRIMARY KEY, provider TEXT NOT NULL,
+    slug TEXT NOT NULL, identity TEXT NOT NULL, status TEXT NOT NULL, submitted_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS icp_versions (id INTEGER PRIMARY KEY, hash TEXT UNIQUE, icp TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS scores (contact_id INTEGER NOT NULL, icp_id INTEGER NOT NULL, icp_fit INTEGER,
     intent TEXT, evidence_comment INTEGER, clean_title TEXT, company_guess TEXT, evidence_hash TEXT,
@@ -79,6 +84,8 @@ def connect(path=None):
         for column in ('qualification_reason', 'intent_reason'):
             if column not in columns:
                 con.execute(f"ALTER TABLE scores ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        if 'enrichment_json' not in {r['name'] for r in con.execute('PRAGMA table_info(profile_snapshots)')}:
+            con.execute("ALTER TABLE profile_snapshots ADD COLUMN enrichment_json TEXT NOT NULL DEFAULT '{}'")
     return con
 
 
@@ -92,7 +99,11 @@ def digest(obj):
 
 def evidence_hash(e):
     """What a score is judged on. Any change here makes earlier scores of this person stale."""
-    return digest({k: e.get(k) or '' for k in ('position', 'location', 'company')} | {'comments': e.get('comments') or []})
+    evidence = {k: e.get(k) or '' for k in ('position', 'location', 'company')} | {'comments': e.get('comments') or []}
+    enrichment = {k: v for k, v in (e.get('icp_enrichment') or {}).items() if k != 'checked_at'}
+    if enrichment:
+        evidence['icp_enrichment'] = enrichment
+    return digest(evidence)
 
 
 def icp_hash(icp):
@@ -190,13 +201,14 @@ def contact_for(con, aliases, name=None, slug=None):
 
 def snapshot(con, cid, e, source):
     ev = {'headline': e.get('position') or '', 'location': e.get('location') or '', 'company': e.get('company') or ''}
-    if not any(ev.values()):
+    enrichment = e.get('icp_enrichment') or {}
+    if not any(ev.values()) and not enrichment:
         return
-    h = digest(ev)
+    h = digest(ev | {'icp_enrichment': enrichment})
     last = con.execute('SELECT hash FROM profile_snapshots WHERE contact_id=? ORDER BY id DESC LIMIT 1', (cid,)).fetchone()
     if not last or last[0] != h:
-        con.execute('INSERT INTO profile_snapshots (contact_id, headline, location, company, source, hash, taken_at) '
-                    'VALUES (?,?,?,?,?,?,?)', (cid, *ev.values(), source, h, now()))
+        con.execute('INSERT INTO profile_snapshots (contact_id, headline, location, company, source, hash, taken_at, enrichment_json) '
+                    'VALUES (?,?,?,?,?,?,?,?)', (cid, *ev.values(), source, h, now(), json.dumps(enrichment)))
 
 
 def touch_evidence(con, cid, e):
@@ -210,6 +222,10 @@ def profile_state(con, cid):
         row = con.execute(f"SELECT {column} FROM profile_snapshots WHERE contact_id=? "
                           f"AND {column} IS NOT NULL AND TRIM({column}) != '' ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
         state[field] = row[0] if row else ''
+    row = con.execute("SELECT enrichment_json FROM profile_snapshots WHERE contact_id=? "
+                      "AND enrichment_json != '{}' ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+    if row:
+        state['icp_enrichment'] = json.loads(row[0])
     return state
 
 

@@ -1,6 +1,27 @@
 # Actor Schemas
 
-Reference for the Apify actors used by this tool.
+Reference for the Apify actors and enrichment evidence used by this tool.
+
+## Optional GetLeads evidence
+
+`src/getleads.py` uses [GetLeads REST enrichment](https://www.getleads.io/docs/#2-from-linkedin-profile-url): bearer authentication from GETLEADS_API_KEY, `POST https://app.getleads.io/api/v1/enrich/from-linkedin`, body `{"items":[{"linkedin_url":"https://www.linkedin.com/in/example"}],"limit_per_item":1}`. The adapter sends at most 25 URLs per request (provider maximum 100), correlates results by their echoed `linkedinUrl`, and requires a matching `data.linkedin_url` before accepting a match. A completed miss is `success:false,data:null`. Missing, duplicated or conflicting identities hold the batch as unknown.
+
+The allowlisted `data` fields are normalized into `engagers.json` → `icp_enrichment`:
+
+| Internal field | Provider fields (first populated) |
+|---|---|
+| `title` | `current_title` |
+| `company` | `current_company_name`, `co_name` |
+| `company_domain` | `current_company_website`, `org_domain`, `co_website` |
+| `company_industry` | `current_company_industry`, `main_industry` |
+| `company_size` | `employee_count_range` (a band, not an exact count) |
+| `company_description` | `co_description` |
+| `person_location` | `current_location` |
+| `person_country` | `contact_country`, `location_country` |
+
+`source:getleads` and the local `checked_at` timestamp accompany the evidence. Email/phone fields and unknown fields are discarded. Company HQ fields never fill person geography. The scorer sees this data separately from the harvested fields and must explain conflicts or absent evidence. CSV uses `getleads_` prefixes for these fields, plus `getleads_status` and `getleads_checked_at`.
+
+SQLite automatically adds `provider_enrichments` (URL cache), `enrichment_attempts` (durable submission cap/history), and `profile_snapshots.enrichment_json`. Enrichment evidence participates in evidence hashes and score contexts; the local lookup timestamp alone does not invalidate a score. Old snapshots, purchased lookups and campaign history are preserved. See [operations](OPERATIONS.md#optional-getleads-icp-evidence) for limits, caching and recovery.
 
 ---
 

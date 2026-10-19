@@ -16,6 +16,9 @@ Your buyer criteria + a competitor profile or post
               Collect engagers (Apify)
                        |
          Score ICP fit + comment intent (Claude)
+                       |
+        Fill missing buyer evidence (optional: GetLeads)
+          Final ICP score with the added evidence
           Qualified / rejected, with reasons
                        |
          Check history and do-not-contact list
@@ -72,6 +75,8 @@ Fit is an estimate based on available evidence. Review shortlisted people before
 [See an example CSV](examples/ranked_engagers.sample.csv) with qualified, rejected, active, stale and unchecked leads ([sample context](examples/README.md)).
 
 ## Optional next steps
+
+Already use GetLeads? Add `--getleads` to fill missing buyer/company evidence for plausible candidates before final scoring. Apify still collects the engagers. GetLeads uses your plan credits or fair-use allowance; the $0.012 engager-scraping charge does not apply to these lookups. Set `GETLEADS_API_KEY` locally; [preview lookups and usage](docs/OPERATIONS.md#optional-getleads-icp-evidence) first. Results are cached across runs.
 
 Ask Claude to add an activity check (`--activity`, requires `TYPESAFE_API_KEY`), draft connection notes and DMs, find verified work emails, or preview an import into HeyReach or Smartlead. These integrations may need additional API keys and credits. Campaign imports require a separate `--execute` command.
 

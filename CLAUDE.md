@@ -1,6 +1,6 @@
 # Operating this play
 
-Read README.md for the overview and docs/OPERATIONS.md for current commands and caveats. Providers: Apify, Prospeo, Smartlead, HeyReach; optional OpenAI or the `claude` CLI (automatic scoring), Supabase and TypeSafe (for `--activity`).
+Read README.md for the overview and docs/OPERATIONS.md for current commands and caveats. Providers: Apify, Prospeo, Smartlead, HeyReach; optional GetLeads (ICP evidence), OpenAI or the `claude` CLI (automatic scoring), Supabase and TypeSafe (for `--activity`).
 
 Validation: `uv run python -m unittest discover -s tests -v`.
 
@@ -33,3 +33,5 @@ Smartlead and HeyReach recheck current evidence, scoring provenance, suppression
 Every scored person needs a nonempty `qualification_reason` and `intent_reason`, including rejected and borderline people. Cite the supplied role/employer/location/comment evidence and relevant ICP criteria; state missing firmographic evidence instead of inventing it. These are short decision explanations. Both reasons are persisted with the score and carried into CSVs. Changing the qualification threshold recomputes `qualification_status`; the evidence explanation remains attached to the score.
 
 Activity Intel uses the configured Jev model through TypeSafe (`activity.toml`, default `jev-latest`). Activity exports include `activity_reason`, model, probability and evidence link; skipped checks are `not_checked`, failed judgments are `unknown`, with an explicit reason. Never describe either as proof of inactivity. `outreach_reason` remains a compatibility alias. Activity readiness is advisory, separate from ICP qualification and ledger eligibility.
+
+`--getleads` is optional selective ICP enrichment, not a replacement harvest. Keep Apify for engagement and opaque-ID resolution. Preview `src/getleads.py --slug <slug> --dry-run` and state the submitted-identity cap before enabling it. It uses GETLEADS_API_KEY, plan credits/fair-use (one credit per submitted URL, including misses), never the GetLeads scraping wallet. Only borderline-and-up candidates with missing ICP evidence and no recorded suppression/campaign block are sent. Default cap 100 per slug persists across retries. Matched/partial and not-found results are cached for 30 days across runs. New GetLeads evidence requires fresh score_context judgments before exports, just like resolved profile evidence. Keep provider fields separate when employers conflict; never infer exact headcount from a size band or substitute HQ for person geography. Pending/unknown billable submissions require provider review before an explicit --retry-unknown; never silently retry them. GetLeads email/phone fields are discarded; verified email discovery remains Prospeo. Each repository user supplies their own keys.

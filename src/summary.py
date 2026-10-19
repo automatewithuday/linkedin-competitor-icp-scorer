@@ -25,6 +25,8 @@ def summarize(rows, top=20, min_fit=4):
     if 'resolve_status' in cols:
         lines.append(f"Profile lookups (opaque ids -> public URLs): "
                      f"{dict(Counter(r['resolve_status'] or 'not_needed' for r in rows))}")
+    if any(r.get('getleads_status') for r in rows):
+        lines.append('GetLeads ICP evidence: ' + str(dict(Counter(r.get('getleads_status') or 'not_checked' for r in rows))))
     if 'ledger_status' in cols:
         lines.append(f"Ledger gate (eligible for activity, drafts, emails, pushes): "
                      f"{dict(Counter(r['ledger_status'].split(':')[0] for r in rows))}")
