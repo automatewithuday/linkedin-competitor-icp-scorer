@@ -23,7 +23,8 @@ def summarize(rows, top=20, min_fit=4):
         lines.append(f"Qualified (fit>={min_fit}): {len(qual)}; with public profile URL: {public}; "
                      f"high-intent comments: {sum(r.get('intent') == 'high' for r in rows)}")
     if 'resolve_status' in cols:
-        lines.append(f"Resolve (opaque ids -> public URLs): {dict(Counter(r['resolve_status'] for r in rows))}")
+        lines.append(f"Profile lookups (opaque ids -> public URLs): "
+                     f"{dict(Counter(r['resolve_status'] or 'not_needed' for r in rows))}")
     if 'activity_status' in cols:
         checked = [r for r in rows if not r.get('activity_miss_reason')]
         miss = Counter(r['activity_miss_reason'] for r in rows if r.get('activity_miss_reason'))

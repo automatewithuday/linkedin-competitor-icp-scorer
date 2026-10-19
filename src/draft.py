@@ -126,8 +126,13 @@ def main() -> None:
         except ValueError:
             post_ids = []
         todo.append({**r, "template": t, "topic": post_topic(post_ids, posts)})
-    if not todo:
-        sys.exit(f"No rows with icp_fit >= {args.min_fit}; nothing to draft.")
+    fields = ["rank", "name", "clean_title", "company_guess", "icp_fit", "intent", "template",
+              "topic", "comment_excerpt", "connection_note", "dm", "linkedin_url"]
+    out = base / "drafts.csv"
+    if not todo:  # a normal outcome for many audiences: leave an empty file, not a stale one, and carry on
+        write_csv(out, [], fields)
+        print(f"No rows with icp_fit >= {args.min_fit}; wrote an empty {out}.")
+        return
 
     system = system_prompt()
     in_tok = out_tok = 0
@@ -141,9 +146,6 @@ def main() -> None:
             r["dm"] = d["dm"].strip()
         print(f"  drafted {min(s + BATCH_SIZE, len(todo))}/{len(todo)}")
 
-    fields = ["rank", "name", "clean_title", "company_guess", "icp_fit", "intent", "template",
-              "topic", "comment_excerpt", "connection_note", "dm", "linkedin_url"]
-    out = base / "drafts.csv"
     write_csv(out, todo, fields)
     over = sum(1 for r in todo if len(r["connection_note"]) > NOTE_LIMIT)
     print(f"Wrote {out} ({len(todo)} drafts, tokens in/out {in_tok}/{out_tok})")

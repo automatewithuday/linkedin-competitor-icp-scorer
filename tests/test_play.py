@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -353,54 +354,6 @@ class OpaqueIdTests(unittest.TestCase):
         self.assertIn('location: "Austin, Texas, United States"', line)
         self.assertIn('company: "Acme"', line)
 
-    def write_ranked(self, d):
-        rows = [{'name': 'Hot', 'icp_fit': '5', 'linkedin_url': 'https://www.linkedin.com/in/ACoAA5', 'actor_id': 'ACoAA5'},
-                {'name': 'Cold', 'icp_fit': '2', 'linkedin_url': 'https://www.linkedin.com/in/ACoAA2', 'actor_id': 'ACoAA2'},
-                {'name': 'Public', 'icp_fit': '5', 'linkedin_url': 'https://www.linkedin.com/in/jane', 'actor_id': 'ACoAA9'},
-                {'name': 'Gone', 'icp_fit': '4', 'linkedin_url': 'https://www.linkedin.com/in/ACoAA4', 'actor_id': 'ACoAA4'}]
-        source, output = str(Path(d) / 'ranked.csv'), str(Path(d) / 'resolved.csv')
-        common.write_csv(source, rows, list(rows[0]))
-        return source, output
-
-    @patch.dict('os.environ', {'APIFY_TOKEN': 'test'})
-    @patch('src.resolve.scrape')
-    def test_resolve_statuses(self, scrape):
-        scrape.return_value = ({'ACoAA5': {'id': 'ACoAA5', 'linkedinUrl': 'https://www.linkedin.com/in/Hot-One',
-                                           'location': {'linkedinText': 'London, UK'}}}, True)
-        with tempfile.TemporaryDirectory() as d:
-            source, output = self.write_ranked(d)
-            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output]):
-                resolve.main()
-            rows, fields = common.read_csv(output)
-        self.assertEqual(scrape.call_args.args[0], ['ACoAA5', 'ACoAA4'])
-        got = {r['name']: (r['resolve_status'], r['linkedin_url'], r['location']) for r in rows}
-        self.assertEqual(got['Hot'], ('resolved', 'https://www.linkedin.com/in/hot-one', 'London, UK'))
-        self.assertEqual(got['Cold'][0], 'skipped')
-        self.assertEqual(got['Public'][0], 'skipped')
-        self.assertEqual(got['Gone'], ('not_found', 'https://www.linkedin.com/in/ACoAA4', ''))
-        self.assertIn("'resolved': 1", '\n'.join(summary.summarize(rows)))
-
-    @patch.dict('os.environ', {'APIFY_TOKEN': 'test'})
-    @patch('src.resolve.scrape')
-    def test_resolve_error_and_dry_run(self, scrape):
-        scrape.side_effect = RuntimeError('boom')
-        with tempfile.TemporaryDirectory() as d:
-            source, output = self.write_ranked(d)
-            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output]):
-                resolve.main()
-            self.assertEqual([r['resolve_status'] for r in common.read_csv(output)[0]],
-                             ['error', 'skipped', 'skipped', 'error'])
-            scrape.side_effect = None  # free-plan refusal: SUCCEEDED run whose only item is an error
-            scrape.return_value = resolve.parse([{'error': 'Free users are limited to 10 items per run.'}], 'SUCCEEDED')
-            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output]):
-                resolve.main()
-            self.assertEqual(common.read_csv(output)[0][3]['resolve_status'], 'error')
-            scrape.reset_mock()
-            Path(output).unlink()
-            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output, '--dry-run']):
-                resolve.main()
-            self.assertFalse(Path(output).exists())
-        scrape.assert_not_called()
 
 
 class LlmProviderTests(unittest.TestCase):
@@ -467,22 +420,6 @@ class HeyReachTests(unittest.TestCase):
 
 
 class NewUserRegressionTests(unittest.TestCase):
-    @patch('src.resolve.scrape')
-    def test_resolve_rerun_reuses_paid_results(self, scrape):
-        from src import resolve
-        row = {'name': 'J', 'icp_fit': '5', 'actor_id': 'ACoAAX', 'linkedin_url': 'https://www.linkedin.com/in/ACoAAX'}
-        with tempfile.TemporaryDirectory() as d:
-            src_, out = str(Path(d) / 'ranked.csv'), str(Path(d) / 'resolved.csv')
-            common.write_csv(src_, [row], list(row))
-            common.write_csv(out, [{**row, 'linkedin_url': 'https://www.linkedin.com/in/jane', 'location': 'London',
-                                    'resolve_status': 'resolved'}], list(row) + ['location', 'resolve_status'])
-            with patch('sys.argv', ['resolve.py', '--input', src_, '--output', out]):
-                resolve.main()
-            got = common.read_csv(out)[0][0]
-        scrape.assert_not_called()
-        self.assertEqual((got['linkedin_url'], got['resolve_status'], got['location']),
-                         ('https://www.linkedin.com/in/jane', 'resolved', 'London'))
-
     @patch('src.activity.subprocess.run', return_value=SimpleNamespace(returncode=0))
     def test_activity_dry_run_leaves_run_folder_untouched(self, run):
         with tempfile.TemporaryDirectory() as d:
@@ -534,26 +471,165 @@ class LockedVersionTests(unittest.TestCase):
         self.assertIn('Strong comments below the fit bar', text)
         self.assertLess(text.index('Buyer'), text.index('  2 Commenter'))
 
+
+def make_run(d, engagers, fits):
+    base = Path(d) / 's'; base.mkdir()
+    (base / 'engagers.json').write_text(json.dumps(engagers))
+    common.write_csv(base / 'ranked_engagers.csv', [{'actor_id': k, 'icp_fit': str(v)} for k, v in fits.items()],
+                     ['actor_id', 'icp_fit'])
+    return base
+
+
+def opaque(pid, name):
+    return {'id': pid, 'name': name, 'linkedinUrl': f'https://www.linkedin.com/in/{pid}'}
+
+
+def profile(pid, slug, where='London', employer='Acme'):
+    return {'id': pid, 'publicIdentifier': slug, 'location': {'linkedinText': where},
+            'currentPosition': [{'companyName': employer}]}
+
+
+@patch.dict('os.environ', {'APIFY_TOKEN': 'test-dummy'})  # no-spend suite must not depend on a real token (review #7)
+class ReviewFindingTests(unittest.TestCase):
     @patch('src.resolve.scrape')
-    def test_pre_scoring_enrichment_writes_profile_data_once(self, scrape):
+    def test_lookup_statuses_cache_and_run_log(self, scrape):
         from src import resolve
-        scrape.return_value = ({'ACoAA3': {'id': 'ACoAA3', 'publicIdentifier': 'jane', 'location': {'linkedinText': 'London'},
-                                           'currentPosition': [{'companyName': 'Acme'}]}}, True)
+        scrape.return_value = ({'ACoAA5': profile('ACoAA5', 'Hot-One')}, True, 'run1')
+        with tempfile.TemporaryDirectory() as d:
+            eng = [opaque('ACoAA5', 'Hot'), opaque('ACoAA2', 'Cold'),
+                   {'id': 'ACoAA9', 'name': 'Public', 'linkedinUrl': 'https://www.linkedin.com/in/jane'}, opaque('ACoAA4', 'Gone')]
+            base = make_run(d, eng, {'ACoAA5': 5, 'ACoAA2': 2, 'ACoAA9': 5, 'ACoAA4': 4})
+            self.assertEqual(resolve.enrich_harvest(base, 3), ([0], []))
+            self.assertEqual(scrape.call_args.args[0], ['ACoAA5', 'ACoAA4'])  # fit 2 and public never sent
+            out = json.loads((base / 'engagers.json').read_text())
+            self.assertEqual((out[0]['linkedinUrl'], out[0]['location'], out[0]['company'], out[0]['resolve_status']),
+                             ('https://www.linkedin.com/in/hot-one', 'London', 'Acme', 'resolved'))
+            self.assertEqual(out[3]['resolve_status'], 'not_found')
+            self.assertEqual(json.loads((base / 'rescore.json').read_text())['indices'], [0])
+            self.assertEqual(json.loads((base / 'resolve_runs.json').read_text())[0]['run_id'], 'run1')
+            scrape.reset_mock()
+            self.assertEqual(resolve.enrich_harvest(base, 3), ([], []))  # resolved and missed: nothing paid twice
+            scrape.assert_not_called()
+
+    @patch('src.resolve.scrape')
+    def test_misses_cached_even_when_nothing_found_and_refreshable(self, scrape):  # review #3
+        from src import resolve
+        scrape.return_value = ({}, True, 'r')
+        with tempfile.TemporaryDirectory() as d:
+            base = make_run(d, [opaque('ACoAA1', 'A')], {'ACoAA1': 4})
+            resolve.enrich_harvest(base, 3)
+            self.assertEqual(json.loads((base / 'engagers.json').read_text())[0]['resolve_status'], 'not_found')
+            scrape.reset_mock(); resolve.enrich_harvest(base, 3); scrape.assert_not_called()
+            resolve.enrich_harvest(base, 3, refresh_misses=True); self.assertEqual(scrape.call_count, 1)
+            eng = json.loads((base / 'engagers.json').read_text())
+            eng[0]['resolve_checked_at'] = '2020-01-01T00:00:00+00:00'  # older than MISS_DAYS: expires
+            (base / 'engagers.json').write_text(json.dumps(eng))
+            scrape.reset_mock(); resolve.enrich_harvest(base, 3); self.assertEqual(scrape.call_count, 1)
+
+    @patch('src.resolve.scrape')
+    def test_later_batch_failure_keeps_earlier_paid_batches(self, scrape):  # review #2
+        from src import resolve
+        ids = [f'ACoAA{n:02d}' for n in range(11)]
+        scrape.side_effect = [({i: profile(i, f'p{i}') for i in ids[:10]}, True, 'r1'), RuntimeError('network')]
+        with tempfile.TemporaryDirectory() as d:
+            base = make_run(d, [opaque(i, i) for i in ids], {i: 4 for i in ids})
+            changed, failed = resolve.enrich_harvest(base, 3, batch_size=10)
+            self.assertEqual((len(changed), failed), (10, [ids[10]]))
+            self.assertEqual(sum(e.get('resolve_status') == 'resolved'
+                                 for e in json.loads((base / 'engagers.json').read_text())), 10)
+            scrape.side_effect = None
+            scrape.return_value = ({ids[10]: profile(ids[10], 'last')}, True, 'r2')
+            resolve.enrich_harvest(base, 3, batch_size=10)
+            self.assertEqual(scrape.call_args.args[0], [ids[10]])  # only the unresolved one is retried
+
+    @patch('src.resolve.scrape')
+    def test_free_plan_error_item_is_a_failure_and_exits_3(self, scrape):
+        from src import resolve
+        scrape.return_value = (*resolve.parse([{'error': 'Free users are limited to 10 items per run.'}], 'SUCCEEDED'), 'r')
+        with tempfile.TemporaryDirectory() as d:
+            base = make_run(d, [opaque('ACoAA1', 'A')], {'ACoAA1': 4})
+            with patch('sys.argv', ['resolve.py', '--slug', 's', '--output-dir', d]), self.assertRaises(SystemExit) as ex:
+                resolve.main()
+            self.assertEqual(ex.exception.code, resolve.FAILED_EXIT)
+            self.assertNotIn('resolve_status', json.loads((base / 'engagers.json').read_text())[0])  # not a cached miss
+            scrape.reset_mock()
+            with patch('sys.argv', ['resolve.py', '--slug', 's', '--output-dir', d, '--dry-run']):
+                resolve.main()
+            scrape.assert_not_called()
+
+    @patch('src.resolve.scrape')
+    def test_pending_rescore_indices_survive_a_partial_pass(self, scrape):
+        from src import resolve
+        scrape.return_value = ({'ACoAA2': profile('ACoAA2', 'b')}, True, 'r')
+        with tempfile.TemporaryDirectory() as d:
+            base = make_run(d, [opaque('ACoAA1', 'A'), opaque('ACoAA2', 'B')], {'ACoAA1': 4, 'ACoAA2': 4})
+            scores = Path(d) / 'scores.json'; scores.write_text('{}')
+            os.utime(scores, (1, 1))  # scored before the earlier pass
+            (base / 'rescore.json').write_text(json.dumps({'indices': [0]}))
+            resolve.enrich_harvest(base, 3, scores=str(scores))
+            self.assertEqual(json.loads((base / 'rescore.json').read_text())['indices'], [0, 1])
+
+    def test_failed_lookup_stops_pipeline_before_downstream(self):  # review #1
+        import run as orchestrator
+        calls = []
+
+        def fake(cmd, check=False):
+            calls.append(' '.join(cmd))
+            return SimpleNamespace(returncode=3 if 'src/resolve.py' in cmd else 0)
         with tempfile.TemporaryDirectory() as d:
             base = Path(d) / 's'; base.mkdir()
-            eng = [{'id': 'ACoAA3', 'name': 'Jane', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA3'},
-                   {'id': 'ACoAA2', 'name': 'Low', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA2'},
-                   {'id': 'ACoAA9', 'name': 'Gone', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA9'}]
-            (base / 'engagers.json').write_text(json.dumps(eng))
-            common.write_csv(base / 'ranked_engagers.csv', [{'actor_id': 'ACoAA3', 'icp_fit': '3'},
-                             {'actor_id': 'ACoAA2', 'icp_fit': '2'}, {'actor_id': 'ACoAA9', 'icp_fit': '4'}], ['actor_id', 'icp_fit'])
-            self.assertEqual(resolve.enrich_harvest(base, 3), [0])
-            self.assertEqual(sorted(scrape.call_args.args[0]), ['ACoAA3', 'ACoAA9'])  # fit 2 never sent
-            out = json.loads((base / 'engagers.json').read_text())
-            self.assertEqual((out[0]['linkedinUrl'], out[0]['location'], out[0]['company']),
-                             ('https://www.linkedin.com/in/jane', 'London', 'Acme'))
-            self.assertEqual(out[2]['resolve_status'], 'not_found')
-            self.assertEqual(json.loads((base / 'rescore.json').read_text())['indices'], [0])
-            scrape.reset_mock()
-            self.assertEqual(resolve.enrich_harvest(base, 3), [])  # rerun: resolved and not_found are not paid again
-            scrape.assert_not_called()
+            for f in ('posts.json', 'engagers.json'):
+                (base / f).write_text('[]')
+            icp_path, scores = Path(d) / 'icp.yaml', Path(d) / 'scores.json'
+            icp_path.write_text('titles: []'); scores.write_text('{"results": []}')
+            argv = ['run.py', '--slug', 's', '--output-dir', d, '--skip-harvest', '--icp', str(icp_path),
+                    '--scores', str(scores), '--activity', '--find-emails']
+            with patch.dict('os.environ', {'TYPESAFE_API_KEY': 'x', 'PROSPEO_API_KEY': 'x'}), \
+                 patch('run.subprocess.run', side_effect=fake), patch('sys.argv', argv), self.assertRaises(SystemExit):
+                orchestrator.main()
+        self.assertEqual(sum('src/resolve.py' in c for c in calls), 1)
+        self.assertIn('--slug', next(c for c in calls if 'src/resolve.py' in c))
+        self.assertFalse(any(x in c for c in calls for x in ('activity.py', 'email_enrich.py', 'summary.py')))
+
+    def test_later_comment_drives_intent_and_keeps_its_post(self):  # review #4
+        e = {'id': 'A', 'name': 'J', 'position': 'VP Sales', 'engagement_count': 2,
+             'comments': ['Great post', 'We are evaluating vendors this week. Can we book a demo?'],
+             'comment_post_urls': ['https://www.linkedin.com/posts/one', 'https://www.linkedin.com/posts/two']}
+        line = rank.engager_lines([e])[0]
+        self.assertIn('c2: "We are evaluating vendors', line)
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            (base / 'engagers.json').write_text(json.dumps([e])); (base / 'recipient_icp.json').write_text('{}')
+            scores = Path(d) / 'scores.json'
+            scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': 'high', 'evidence_comment': 2}]}))
+            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+                rank.main()
+            row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
+        self.assertTrue(row['comment_excerpt'].startswith('We are evaluating vendors'))
+        self.assertEqual(row['comment_post_url'], 'https://www.linkedin.com/posts/two')
+
+    def test_profile_employer_survives_a_null_headline_guess(self):  # review #5
+        e = {'id': 'A', 'name': 'J', 'position': 'VP Sales', 'company': 'Acme', 'engagement_count': 1}
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            (base / 'engagers.json').write_text(json.dumps([e])); (base / 'recipient_icp.json').write_text('{}')
+            scores = Path(d) / 'scores.json'
+            scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': None, 'company_guess': None}]}))
+            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+                rank.main()
+            row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
+        self.assertEqual((row['company_guess'], row['company_source']), ('Acme', 'profile'))
+
+    def test_draft_with_zero_qualified_writes_empty_file_and_succeeds(self):  # review #6
+        from src import draft
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            (base / 'recipient_icp.json').write_text('{}')
+            (base / 'drafts.csv').write_text('stale\n')
+            common.write_csv(base / 'ranked_engagers.csv', [{'rank': '1', 'name': 'Low', 'icp_fit': '2', 'intent': 'low'}],
+                             ['rank', 'name', 'icp_fit', 'intent'])
+            with patch.object(draft, 'llm_json') as llm, patch('sys.argv', ['draft.py', '--slug', 's', '--output-dir', d]):
+                draft.main()
+            rows, fields = common.read_csv(base / 'drafts.csv')
+        llm.assert_not_called()
+        self.assertEqual((rows, fields[:2]), ([], ['rank', 'name']))

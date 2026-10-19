@@ -125,6 +125,7 @@ def build_engagers(items: list) -> list:
                 "posts_touched": set(),
                 "reaction_types": [],
                 "comments": [],
+                "comment_post_ids": [],  # parallel to comments
             }
             engagers[aid] = e
 
@@ -149,6 +150,7 @@ def build_engagers(items: list) -> list:
             text = it.get("commentary")
             if text:
                 e["comments"].append(text)
+                e["comment_post_ids"].append(post_id or "")
 
     out = []
     for e in engagers.values():
@@ -259,6 +261,7 @@ def main() -> None:
     for e in engagers:
         e['source_profile'] = source
         e['post_urls'] = [urls[pid] for pid in e['posts_touched'] if pid in urls]
+        e['comment_post_urls'] = [urls.get(pid, '') for pid in e.get('comment_post_ids', [])]
     with_comments = sum(1 for e in engagers if e["comments"])
 
     (out_dir / "posts.json").write_text(

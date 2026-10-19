@@ -22,7 +22,7 @@ Fill in `.env` locally. Do not paste keys into chat or commit them. You need Api
 
 ICP scoring needs a judge. Three options, no code changes:
 
-- **In-session (Claude Code, no key):** after the harvest run `uv run src/rank.py --dump --slug <slug>`, judge every numbered engager with the rubric in `src/rank.py` (`SYSTEM`), write `output/<slug>/scores.json` as `{"results": [{"i": 0, "icp_fit": 1-5, "intent": "high"|"medium"|"low"|null, "clean_title": "...", "company_guess": "..."|null}, ...]}` with one object per engager, and continue with `uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores output/<slug>/scores.json ...`. The same validation applies to every scorer.
+- **In-session (Claude Code, no key):** after the harvest run `uv run src/rank.py --dump --slug <slug>`, judge every numbered engager with the rubric in `src/rank.py` (`SYSTEM`), write `output/<slug>/scores.json` as `{"results": [{"i": 0, "icp_fit": 1-5, "intent": "high"|"medium"|"low"|null, "evidence_comment": 2|null, "clean_title": "...", "company_guess": "..."|null}, ...]}` with one object per engager. The dump shows up to 900 characters of each person's comments as `c1`, `c2`, ...; `evidence_comment` names the one the intent rests on, and that comment becomes `comment_excerpt`, with the post it was left on in `comment_post_url`, and continue with `uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores output/<slug>/scores.json ...`. The same validation applies to every scorer.
 
 - **OpenAI API key** (automatic): set `OPENAI_API_KEY` in `.env`. Default model `gpt-4.1-mini`, override with `OPENAI_MODEL`. Pay per token; a 60-engager run costs well under a cent.
 - **Claude subscription via the CLI** (automatic, no API key; picked automatically when `claude` is on PATH and no OpenAI key is set, which is always true inside Claude Code, so pass `--scores` there): install [Claude Code](https://claude.com/claude-code), run `claude` once to log in, and leave `OPENAI_API_KEY` empty. Scoring shells out to `claude -p` and is billed against your subscription's usage limits instead of dollars. Default model `sonnet`, override with `CLAUDE_MODEL` (`haiku`, `opus`). Each batch of 25 engagers is one CLI call. Output is not temperature-pinned, so scores can differ by one point between reruns.
@@ -44,7 +44,7 @@ uv run run.py \
   --posted-limit month
 ```
 
-This produces `output/scraping-test-01/ranked_engagers.csv` and `resolved.csv` (the resolve step runs by default at $0.004 per qualified opaque id; `--no-resolve` skips it), without email enrichment, campaign imports, or database writes. Compare sampled engagers and comments with the source posts, then manually review high, borderline and low ICP scores. The current qualification threshold is `icp_fit >= 4`; missing company size and geography still require verification.
+This produces `output/scraping-test-01/ranked_engagers.csv` (opaque candidates are looked up before final scoring at $0.004 each; `--no-resolve` skips it), without email enrichment, campaign imports, or database writes. Compare sampled engagers and comments with the source posts, then manually review high, borderline and low ICP scores. The current qualification threshold is `icp_fit >= 4`; missing company size and geography still require verification.
 
 After changing your ICP, rescore the saved scrape without running Apify again:
 
@@ -70,7 +70,7 @@ Outputs in `output/competitor-2026-09-16/`:
 - `recipient_icp.json`: criteria used for scoring.
 - `scores.json`, `rescore.json`: in-session judgments, and the rows to rescore after the profile pass.
 - `ranked_engagers.csv`: everyone, including low-fit leads, qualified first, with source profile and post references.
-- `resolved.csv`: the ranked rows with hidden profile ids resolved (`resolve_status`, `location`).
+- `resolve_runs.json`: every profile-lookup actor run (run id, ids sent, complete or error), for reconciling Apify charges.
 - `activity.csv` and `activity/`: with `--activity`, LinkedIn activity verdicts plus the full per-profile output and raw cache.
 - `enriched.csv`: all rows with email verification fields and a `miss_reason` for every skipped/unresolved row.
 - `enriched.prospeo-cache.json`: checkpointed enrichment results, reusable for 30 days.
@@ -183,31 +183,33 @@ The stage appends these columns and changes nothing else: `linkedin_outreach_rea
 Standalone, always dry-run first; it prints the eligible count, the Apify estimate and the hard spend cap without spending anything:
 
 ```bash
-uv run src/activity.py --input output/competitor-2026-09-16/resolved.csv \
+uv run src/activity.py --input output/competitor-2026-09-16/ranked_engagers.csv \
   --output output/competitor-2026-09-16/activity.csv --dry-run
-uv run src/activity.py --input output/competitor-2026-09-16/resolved.csv \
+uv run src/activity.py --input output/competitor-2026-09-16/ranked_engagers.csv \
   --output output/competitor-2026-09-16/activity.csv --limit 20
 ```
 
-The full ~40-column result, a JSONL copy and the raw actor output land in `output/<slug>/activity/`. To re-judge after changing `activity.toml` without paying Apify again, add `--from-raw output/<slug>/activity/raw/<run>`. Use `resolved.csv` as the input, not `ranked_engagers.csv`: the latter still holds the opaque ids, so resolved leads would be skipped. After a rescore, rerun resolve (free for rows already resolved) and re-join activity with `--from-raw`.
+The full ~40-column result, a JSONL copy and the raw actor output land in `output/<slug>/activity/`. To re-judge after changing `activity.toml` without paying Apify again, add `--from-raw output/<slug>/activity/raw/<run>`. Profile lookups write public URLs back into the harvest, so `ranked_engagers.csv` already carries them. After a rescore, re-join activity for free with `--from-raw`.
 
 `activity.toml` holds the fetch caps, the outreach-ready threshold and the exact TypeSafe question wording. It is user-owned. `src/activity_intel.py` is vendored unchanged from [LinkedIn-Profile-Activity-Intel](https://github.com/automatewithuday/LinkedIn-Profile-Activity-Intel) (MIT, commit `7a3aabd`); that README explains the evidence rules, including why reactions only give a lower bound on the date.
 
 ## Opaque profile IDs
 
-Reaction items, and every engager from a `--profile` harvest, often carry only LinkedIn's opaque profile ID (`/in/ACoAA...`) instead of a public URL. Prospeo, the activity check and Smartlead cannot use those, so in a typical run most qualified rows were silently skipped. Two fixes:
+Reaction items, and every engager from a `--profile` harvest, often carry only LinkedIn's opaque profile ID (`/in/ACoAA...`) instead of a public URL. That hides location and employer from the scorer, and Prospeo, the activity check and Smartlead cannot use the row. Two mechanisms close the gap:
 
-On the Apify free plan HarvestAPI's profile scraper accepts at most 10 ids per run and returns an error item for larger runs (the rows get `resolve_status=error`). `resolve.py --batch-size 10` (or `run.py --resolve-batch 10`) splits the ids into runs of 10. That paces around a provider limit, so it is off unless you pass it.
+- `--post` harvests ask the post actors for `profileScraperMode: "main"`, so nearly every engager arrives with a vanity URL, `location` and current `company` (+$0.002 per engager on top of $0.002 per reaction/comment; the spend cap includes it). `--profile` harvests cannot do this: that actor has no profile mode.
+- **Profile lookups before final scoring** (default): after the first scoring pass, `run.py` runs `src/resolve.py --slug <slug>` over opaque engagers at `icp_fit >= --min-fit - 1` (3 by default): `harvestapi/linkedin-profile-scraper`, $0.004 per profile, hard cap = estimate x 1.25 + $0.05 per run. Results go into `engagers.json` (public URL, `location`, `company`, `resolve_status`). Automatic scorers then rescore on their own. With `--scores` the run stops, lists the indices that gained profile data (also in `rescore.json`), and continues only once `scores.json` has been updated. On a real 151-engager run this cost $0.12 and moved 10 of 53 candidates (4 up, 6 down on geography).
 
-- `--post` harvests ask the post actors for `profileScraperMode: "main"`, so nearly every engager arrives with a vanity URL, `location` and current `company` (+$0.002 per engager on top of $0.002 per reaction/comment; the spend cap includes it). Location and company also reach the scorer (`rank.py --dump`). `--profile` harvests cannot do this: that actor has no profile mode.
-- Two-pass scoring (default): after the first scoring pass, `run.py` resolves opaque engagers at `icp_fit >= --min-fit - 1` (3 by default) with `src/resolve.py --slug <slug>`, reusing anything already in `resolved.csv`, and writes their public URL, `location` and `company` into `engagers.json`. With an automatic scorer it then rescores everything on its own. With `--scores` it stops, lists the indices that gained profile data (also in `output/<slug>/rescore.json`), and asks for those rows to be rescored before continuing; the next run sends nothing already resolved. This is what lets geo and employer rules apply to profile harvests: on a real 151-engager run it cost $0.12 and moved 10 of 53 candidates (4 up, 6 down on geography).
-- After ranking, `run.py` also runs `src/resolve.py` by default as a safety net: one `harvestapi/linkedin-profile-scraper` run over the qualified (`icp_fit >= --min-fit`) rows that still have an opaque ID, at $0.004 per profile (hard cap = estimate x 1.25 + $0.05). It writes `resolved.csv` with the vanity `linkedin_url`, `location` when empty, and `resolve_status`: `resolved`, `not_found` (sent, nothing returned), `skipped` (below min fit, already public, or no ID), `error` (run failed or the provider returned an error item; the other rows carry on). Pass `--no-resolve` to skip it.
+This is the only place profiles are fetched, so every new piece of evidence goes back through scoring before any row reaches activity, drafts, emails or exports:
 
-On a free Apify plan HarvestAPI limits this actor to 10 items per run: a larger run scrapes nothing, returns one error item, and every sent row becomes `error`. Pass `--resolve-batch 10` (or `resolve.py --batch-size 10`), upgrade the plan, or lower the count (for example `--min-fit 5`). Rerunning reuses rows already marked `resolved` in the existing `resolved.csv`, so a rescore never pays for the same profile twice.
+- **Saved per batch.** Each actor run's results are written before the next run starts; `resolve_runs.json` logs every run id.
+- **Failures stop the run.** A provider error, network error or free-plan refusal leaves those rows untouched and the command exits 3, so `run.py` stops before any downstream stage. Rerunning retries only what failed. Pass `--no-resolve` to continue without them.
+- **Nothing paid twice.** Resolved profiles are never looked up again. A completed lookup that finds nothing is cached as `not_found` for 30 days; `resolve.py --refresh-misses` retries sooner.
+- **Free plan.** HarvestAPI allows 10 ids per run on the free Apify plan. Pass `--resolve-batch 10` (or `resolve.py --batch-size 10`), upgrade the plan, or raise `--min-fit`.
 
-Standalone, dry-run first (prints the ID count, the estimate and the cap; spends nothing):
+Standalone, dry-run first (prints the lookup count, the estimate and the cap; spends nothing):
 
 ```bash
-uv run src/resolve.py --input output/competitor-2026-09-16/ranked_engagers.csv \
-  --output output/competitor-2026-09-16/resolved.csv --min-fit 4 --dry-run
+uv run src/resolve.py --slug competitor-2026-09-16 --dry-run
+uv run src/resolve.py --slug competitor-2026-09-16 --batch-size 10   # then rescore the indices in rescore.json
 ```

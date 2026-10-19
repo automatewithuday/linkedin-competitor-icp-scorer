@@ -27,7 +27,6 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
             │
             ▼
  5. Rank         Qualified (fit 4–5) first, then fit × engagement × intent    ──▶  ranked_engagers.csv
-                                                                                    resolved.csv
             │
             ▼  (optional flags)
  6. Activity     Is each qualified lead active on LinkedIn right now?           ──▶  activity.csv
@@ -44,7 +43,7 @@ Steps 1 to 5 always run. Steps 6 to 9 are opt-in flags (`--activity`, `--draft`,
 
 ## What you get
 
-A CSV with one row per engager, qualified leads first, plus a summary with names printed in your terminal or chat. The final file is the last stage you ran: `resolved.csv`, then `activity.csv`, then `enriched.csv`. The columns that matter:
+A CSV with one row per engager, qualified leads first, plus a summary with names printed in your terminal or chat. The final file is the last stage you ran: `ranked_engagers.csv`, then `activity.csv`, then `enriched.csv`. The columns that matter:
 
 | column | meaning |
 |---|---|
@@ -52,15 +51,17 @@ A CSV with one row per engager, qualified leads first, plus a summary with names
 | `intent` | `high`, `medium`, or `low`. From their comment if they left one; reactions alone are always `low`. |
 | `engagement_count` | How many of the competitor's posts they touched. Repeat engagers rank higher. |
 | `rank_score` | Fit, engagement and intent combined. Orders leads within the qualified group and within the rest. |
-| `comment_excerpt` | What they said, so your first message can reference it. |
-| `linkedin_url`, `company_guess`, `clean_title`, `location` | Who they are. |
-| `resolve_status` | `resolved` when a hidden profile id was looked up to a public URL. |
+| `comment_excerpt`, `comment_post_url` | The comment their intent rests on (not just their first one) and the post it was left on, so your first message can reference it. |
+| `linkedin_url`, `company_guess`, `company_source`, `clean_title`, `location` | Who they are. `company_source` is `profile` when the employer comes from their LinkedIn profile, `headline` when it was read from the headline. |
+| `resolve_status` | `resolved` when a hidden profile id was looked up before final scoring; `not_found` when LinkedIn had no public profile for it. |
 | `linkedin_outreach_ready`, `outreach_ready_probability`, `outreach_reason`, `activity_status` | With `--activity`: are they active on LinkedIn now, and why. |
 | `email`, `email_status`, `sendable` | With `--find-emails`: a verified work email when Prospeo has one. |
 
 See [examples/ranked_engagers.sample.csv](examples/ranked_engagers.sample.csv) for a full sample.
 
 ## Quickstart
+
+Supported inputs: a personal LinkedIn profile (`linkedin.com/in/...`, such as a competitor founder or an influencer your buyers follow) or one specific post (`linkedin.com/posts/...`, `/feed/update/...`, or an `lnkd.in` link to one). Company pages (`linkedin.com/company/...`) are not supported.
 
 You need Python 3.11+ with [uv](https://docs.astral.sh/uv/), an [Apify](https://apify.com) token, and a scorer. Inside Claude Code the agent scores in-session (`/setup` and `/first-run` walk you through it, no key). For unattended runs use an OpenAI API key or your Claude subscription through the `claude` CLI (run `claude` once to log in).
 

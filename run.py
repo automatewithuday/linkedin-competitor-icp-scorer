@@ -1,4 +1,4 @@
-"""Orchestrator: harvest -> (enrich) -> icp -> rank -> resolve -> (activity) -> (emails) -> (supabase) -> (smartlead preview) -> summary
+"""Orchestrator: harvest -> (enrich) -> icp -> rank -> profile lookups -> rescore -> (draft) -> (activity) -> (emails) -> (supabase) -> (smartlead preview) -> summary
 
 Usage:
   uv run run.py --profile <linkedin-url> --slug <slug> --icp icp.yaml --scores output/<slug>/scores.json [options]
@@ -61,8 +61,8 @@ def main() -> None:
     ap.add_argument("--resolve-batch", type=int, default=0, metavar="N",
                     help="ids per profile-scraper run for resolve (0 = one run; Apify free plan allows 10)")
     ap.add_argument("--no-resolve", action="store_true",
-                    help="Skip resolving qualified opaque /in/ACoAA... engagers to public URLs "
-                         "(default: on; Apify, $0.004 per qualified opaque profile)")
+                    help="Skip looking up opaque /in/ACoAA... candidates (fit >= min-fit - 1) before final scoring "
+                         "(default: on; Apify, $0.004 per profile, results cached)")
     ap.add_argument("--activity", action="store_true",
                     help="Check LinkedIn activity of qualified leads (Apify, ~$0.04/profile; needs TYPESAFE_API_KEY)")
     args = ap.parse_args()
@@ -171,8 +171,10 @@ def main() -> None:
     if not args.no_resolve:
         rescore = Path(out) / slug / "rescore.json"
         before = rescore.stat().st_mtime if rescore.exists() else None
-        run_step("Resolve candidates before final scoring", [py, "src/resolve.py", "--slug", slug, "--output-dir", out,
-                 "--min-fit", str(max(1, args.min_fit - 1))] + batch)
+        # The only profile fetch. A failed lookup exits non-zero and stops the run here, so no row reaches
+        # activity/email/exports scored without its profile evidence; paid results are kept for the rerun.
+        run_step("Profile lookups before final scoring", [py, "src/resolve.py", "--slug", slug, "--output-dir", out,
+                 "--min-fit", str(max(1, args.min_fit - 1))] + batch + (["--scores", args.scores] if args.scores else []))
         fresh = rescore.exists() and rescore.stat().st_mtime != before
         if args.scores and rescore.exists() and rescore.stat().st_mtime > Path(args.scores).stat().st_mtime:
             todo = json.loads(rescore.read_text(encoding="utf-8"))
@@ -188,10 +190,6 @@ def main() -> None:
     if args.draft:
         run_step("Draft outreach copy", [py, "src/draft.py", "--slug", slug, "--output-dir", out,
                  "--min-fit", str(max(3, args.min_fit))])
-    if not args.no_resolve:
-        final_csv = out_csv.with_name("resolved.csv")
-        run_step("Resolve opaque profile IDs", [py, "src/resolve.py", "--input", str(out_csv),
-                 "--output", str(final_csv), "--min-fit", str(args.min_fit)] + batch)
     if args.activity:
         activity_csv = out_csv.with_name("activity.csv")
         run_step("LinkedIn activity intel", [py, "src/activity.py", "--input", str(final_csv),

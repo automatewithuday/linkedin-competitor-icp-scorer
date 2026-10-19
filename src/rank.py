@@ -73,7 +73,8 @@ SYSTEM = (
     "When a person's line carries location or company (from their profile), that is evidence: use it. "
     "Be honest and stingy. Most engagers on a viral post are NOT buyers -- score them 1-2. "
     "Reserve 4-5 for people whose headline genuinely matches the ICP AND who are in-house.\n\n"
-    "intent (only when a comment is given; if no comment, return null):\n"
+    "intent (only when a comment is given; if no comment, return null). A person may have several numbered "
+    "comments (c1, c2, ...); judge intent from the strongest one and return its number as evidence_comment:\n"
     "  high = comment names a problem/need/evaluation the recipient could sell into.\n"
     "  medium = curious/asking, engaged but no clear need.\n"
     "  low = generic praise, congrats, emoji, self-promotion.\n\n"
@@ -83,6 +84,7 @@ SYSTEM = (
     "(the employer if stated in the headline, else null).\n\n"
     "Return STRICT JSON only, no prose:\n"
     '{"results":[{"i":<number>,"icp_fit":<1-5>,"intent":"high|medium|low"|null,'
+    '"evidence_comment":<comment number>|null,'
     '"clean_title":"...","function":"...","seniority":"...","company_guess":"..."|null}]}'
     "\nReturn exactly one result object per input number."
 )
@@ -116,6 +118,30 @@ def icp_block(icp: dict) -> str:
     )
 
 
+COMMENT_CHARS, COMMENT_BUDGET = 300, 900  # per comment, and per person, so one prolific commenter can't flood a batch
+
+
+def comment_texts(e: dict) -> list[str]:
+    """The person's comments as the scorer sees them: in order, each trimmed, until the budget is spent."""
+    out, used = [], 0
+    for c in e.get("comments") or []:
+        c = (c or "").replace("\n", " ").strip()[:COMMENT_CHARS]
+        if not c:
+            continue
+        if out and used + len(c) > COMMENT_BUDGET:
+            break
+        out.append(c)
+        used += len(c)
+    return out
+
+
+def evidence_index(e: dict, r: dict) -> int:
+    """0-based index into e["comments"] of the comment the intent rests on (scorer's pick, else the first)."""
+    n = len(comment_texts(e))
+    k = r.get("evidence_comment")
+    return k - 1 if type(k) is int and 1 <= k <= n else 0
+
+
 def engager_lines(batch: list[dict], names: bool = False) -> list[str]:
     lines = []
     for i, e in enumerate(batch):
@@ -124,10 +150,9 @@ def engager_lines(batch: list[dict], names: bool = False) -> list[str]:
         for k in ("location", "company"):
             if e.get(k):
                 line += f' | {k}: "{e[k]}"'
-        comments = e.get("comments") or []
-        if comments:
-            c = (comments[0] or "").replace("\n", " ").strip()[:400]
-            line += f' | comment: "{c}"'
+        shown = comment_texts(e)
+        if shown:
+            line += "".join(f' | c{k}: "{c}"' for k, c in enumerate(shown, 1))
         else:
             line += " | comment: (none)"
         lines.append(line)
@@ -193,7 +218,7 @@ def main() -> None:
     n = len(engagers)
     if args.dump:
         print(icp_block(icp))
-        print(f"\nENGAGERS ({n}). Score each with the rubric in rank.SYSTEM; write {{\"results\": [{{i, icp_fit, intent, clean_title, company_guess}}]}}")
+        print(f"\nENGAGERS ({n}). Score each with the rubric in rank.SYSTEM; write {{\"results\": [{{i, icp_fit, intent, evidence_comment, clean_title, company_guess}}]}}")
         print("\n".join(engager_lines(engagers, names=True)))
         return
 
@@ -238,9 +263,14 @@ def main() -> None:
             eng = max(1, int(e.get("engagement_count") or 1))
             rank_score = fit * (1 + math.log(eng)) * INTENT_WEIGHT[intent]
 
-            excerpt = ""
+            excerpt, comment_post_url = "", ""
             if comments:
-                excerpt = (comments[0] or "").replace("\n", " ").strip()[:160]
+                k = evidence_index(e, r)
+                nonblank = [j for j, c in enumerate(comments) if (c or "").strip()]
+                j = nonblank[k] if k < len(nonblank) else 0
+                excerpt = (comments[j] or "").replace("\n", " ").strip()[:160]
+                urls = e.get("comment_post_urls") or []
+                comment_post_url = urls[j] if j < len(urls) else ""
 
             rows.append({
                 "actor_id": e.get("id") or "",
@@ -249,7 +279,9 @@ def main() -> None:
                 "post_urls": json.dumps(e.get("post_urls") or []),
                 "name": e.get("name") or "",
                 "clean_title": (r.get("clean_title") or e.get("position") or "").strip(),
-                "company_guess": r.get("company_guess") or "",
+                # the profile's current employer beats a headline guess; company_source says which one this is
+                "company_guess": e.get("company") or r.get("company_guess") or "",
+                "company_source": "profile" if e.get("company") else ("headline" if r.get("company_guess") else ""),
                 "location": e.get("location") or "",
                 "icp_fit": fit,
                 "engagement_count": eng,
@@ -258,6 +290,7 @@ def main() -> None:
                 "rank_score": round(rank_score, 4),
                 "linkedin_url": e.get("linkedinUrl") or "",
                 "comment_excerpt": excerpt,
+                "comment_post_url": comment_post_url,
                 "resolve_status": e.get("resolve_status") or "",  # set when resolved before final scoring
             })
 
@@ -271,7 +304,8 @@ def main() -> None:
     out_path = base / "ranked_engagers.csv"
     cols = ["rank", "name", "clean_title", "company_guess", "location", "icp_fit",
             "engagement_count", "reaction_types", "intent", "rank_score",
-            "linkedin_url", "comment_excerpt", "actor_id", "source_profile", "post_ids", "post_urls", "resolve_status"]
+            "linkedin_url", "comment_excerpt", "actor_id", "source_profile", "post_ids", "post_urls", "resolve_status",
+            "comment_post_url", "company_source"]
     write_csv(out_path, rows, cols)
 
     qualified = [r for r in rows if r["icp_fit"] >= args.min_fit]
