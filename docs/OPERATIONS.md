@@ -191,7 +191,7 @@ uv run src/activity.py --input output/competitor-2026-09-16/resolved.csv \
 
 The full ~40-column result, a JSONL copy and the raw actor output land in `output/<slug>/activity/`. To re-judge after changing `activity.toml` without paying Apify again, add `--from-raw output/<slug>/activity/raw/<run>`. Use `resolved.csv` as the input, not `ranked_engagers.csv`: the latter still holds the opaque ids, so resolved leads would be skipped. After a rescore, rerun resolve (free for rows already resolved) and re-join activity with `--from-raw`.
 
-`activity.toml` holds the fetch caps, the outreach-ready threshold and the exact TypeSafe question wording. It is user-owned. `src/activity_intel.py` is vendored unchanged from [LinkedIn-Profile-Activity-Intel](https://github.com/automatewithuday/LinkedIn-Profile-Activity-Intel) (MIT, commit `3e3e178`); that README explains the evidence rules, including why reactions only give a lower bound on the date.
+`activity.toml` holds the fetch caps, the outreach-ready threshold and the exact TypeSafe question wording. It is user-owned. `src/activity_intel.py` is vendored unchanged from [LinkedIn-Profile-Activity-Intel](https://github.com/automatewithuday/LinkedIn-Profile-Activity-Intel) (MIT, commit `7a3aabd`); that README explains the evidence rules, including why reactions only give a lower bound on the date.
 
 ## Opaque profile IDs
 

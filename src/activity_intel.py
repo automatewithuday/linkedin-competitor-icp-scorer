@@ -1,6 +1,5 @@
 # Vendored unchanged from https://github.com/automatewithuday/LinkedIn-Profile-Activity-Intel (MIT)
-# commit 3e3e178, plus ONE local patch: ensure_ascii=False in the three username(json.dumps(query)) calls, so
-# vanity slugs with non-ASCII characters (emoji) attribute correctly. Upstream that fix before re-vendoring.
+# commit 7a3aabd. Re-vendor by copying the file over; do not patch locally.
 """LinkedIn profile activity check: HarvestAPI (Apify) evidence -> code-computed facts -> TypeSafe judgments.
 
 uv run --env-file .env activity_intel.py leads.csv [--dry-run] [--limit N] [--from-raw out/raw/<run>]
