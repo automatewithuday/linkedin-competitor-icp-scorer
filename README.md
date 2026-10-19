@@ -28,7 +28,7 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
                  you approve before anything sends
 ```
 
-Steps 1 to 4 are the core. Steps 5 and 6 are opt-in flags.
+Steps 1 to 4 are the core and steps 5 to 7 are opt-in flags. Two more stages sit between them: qualified reactors with hidden profile ids are resolved to public URLs automatically, and `--activity` can check who is actually active on LinkedIn (see "Also in the box").
 
 ## What you get
 
@@ -67,11 +67,18 @@ uv run run.py \
   --max-posts 3 --max-reactions 20 --max-comments 10
 ```
 
+Have one post rather than a profile? Harvest just that post (full URL or `lnkd.in` link), then score and continue:
+
+```bash
+uv run src/harvest.py --post https://lnkd.in/p/XXXX --slug first-post --max-reactions 100 --max-comments 50
+uv run run.py --slug first-post --skip-harvest --icp icp.yaml   # add --scores output/first-post/scores.json if you scored in-session
+```
+
 Open `output/first-test/ranked_engagers.csv`. That run costs well under a dollar of Apify credit and finishes in a few minutes.
 
 ## Also in the box
 
-- **One post instead of a profile.** `--post <url>` (full URL or `lnkd.in` link) harvests exactly that post's engagers, with every engager's public profile URL, location and company. See [docs/OPERATIONS.md](docs/OPERATIONS.md#single-post-harvest).
+- **One post instead of a profile.** `--post <url>` (full URL or `lnkd.in` link) harvests exactly that post's engagers, with nearly every engager's public profile URL, location and company. See [docs/OPERATIONS.md](docs/OPERATIONS.md#single-post-harvest).
 - **Who is actually on LinkedIn right now.** `--activity` checks each qualified lead's recent posts, comments and reactions and adds an outreach-ready verdict (about $0.04 per profile, needs `TYPESAFE_API_KEY`). See [docs/OPERATIONS.md](docs/OPERATIONS.md#linkedin-activity-check-optional).
 - **No lost reactors.** Reaction-only engagers come back from LinkedIn with opaque ids; the pipeline resolves the qualified ones to public URLs so they can be emailed and checked. See [docs/OPERATIONS.md](docs/OPERATIONS.md#opaque-profile-ids).
 - **A summary you can read in chat.** Every run ends with counts and the top rows by name, so you never have to open the CSV.
@@ -96,10 +103,10 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 - **Get emails and push to a campaign**: add `--find-emails` and `--campaign-id` for Smartlead email campaigns, or `--heyreach-list-id` for HeyReach LinkedIn outreach (no email needed; drafts ride along as custom fields). Nothing sends without an explicit `--execute` on a separate command. Details in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 - **Tune the scoring**: your ICP lives in `icp.yaml` (titles, industries, exclusions, disqualifiers, triggers). Rescore a saved harvest without paying Apify again:
   ```bash
-  python src/icp.py --slug first-test --icp icp.yaml
-  python src/rank.py --slug first-test
+  uv run src/icp.py --slug first-test --icp icp.yaml
+  uv run src/rank.py --slug first-test          # or --scores output/first-test/scores.json (in-session)
   ```
-- **Write the outreach**: add `--draft` (or run `python src/draft.py --slug first-test`) to get `drafts.csv` with a LinkedIn connection note and a DM for every lead at fit 4+. Each row is written strictly inside one of the three openers in [playbooks/copy-templates.md](playbooks/copy-templates.md), picked by the fit/intent/comment table there. `--min-fit 3` also drafts the Integration-Partner note for adjacent vendors. Nothing is sent; read and edit before use. The playbooks folder also has a positioning play and a battle-card prompt for writing by hand.
+- **Write the outreach**: add `--draft` (or run `uv run src/draft.py --slug first-test`) to get `drafts.csv` with a LinkedIn connection note and a DM for every lead at fit 4+. Each row is written strictly inside one of the three openers in [playbooks/copy-templates.md](playbooks/copy-templates.md), picked by the fit/intent/comment table there. `--min-fit 3` also drafts the Integration-Partner note for adjacent vendors. Nothing is sent; read and edit before use. The playbooks folder also has a positioning play and a battle-card prompt for writing by hand.
 - **Run weekly**: list profiles in `targets.txt` and use the `/weekly-sweep` command in Claude Code.
 - **Store history**: optional Supabase export keeps every run's scores.
 
@@ -107,7 +114,9 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 
 | what | cost |
 |---|---|
-| Apify harvest | about $0.002 per item. 3 posts with small caps is under $0.20; 10 posts at default caps is $2 to $3. |
+| Apify harvest | profile mode: about $0.002 per item. 3 posts with small caps is under $0.20; 10 posts at default caps is $2 to $3. Single post (`--post`): about $0.004 per engager, full profiles included. |
+| Resolve hidden profile ids | $0.004 per qualified reactor with an opaque id; on by default, `--no-resolve` skips it. Reruns reuse earlier results. |
+| Activity check (`--activity`) | about $0.04 per qualified profile (Apify) plus a negligible TypeSafe charge. |
 | Scoring with OpenAI | under one cent per 100 engagers on `gpt-4.1-mini`. |
 | Scoring with Claude subscription | no dollars; counts against your plan's usage limits. |
 | Prospeo emails | per lookup, capped at 100 per run by default. |
@@ -128,7 +137,7 @@ src/common.py     shared helpers, including the OpenAI-or-Claude switch
 docs/OPERATIONS.md    full command reference and every caveat
 docs/SCHEMAS.md   Apify actor input/output shapes
 playbooks/        outreach copy and positioning
-tests/            mocked, no API spend: python -m unittest discover -s tests
+tests/            mocked, no API spend: uv run python -m unittest discover -s tests
 ```
 
 ## Credits

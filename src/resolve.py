@@ -78,6 +78,18 @@ def main():
                     help='ids per actor run (0 = one run). The Apify free plan allows 10 per run on this actor')
     args = ap.parse_args()
     rows, fields = read_csv(args.input)
+    prior = {}  # actor_id -> earlier resolved row; a rerun after rescoring must not pay twice
+    if os.path.exists(args.output):
+        prior = {r['actor_id']: r for r in read_csv(args.output)[0]
+                 if r.get('resolve_status') == 'resolved' and r.get('actor_id')}
+    for row in rows:
+        hit = prior.get(row.get('actor_id'))
+        if hit and opaque_id(row):
+            row['linkedin_url'], row['resolve_status'] = hit['linkedin_url'], 'resolved'
+            row['location'] = row.get('location') or hit.get('location', '')
+    if prior:
+        print(f'Reusing {sum(r.get("resolve_status") == "resolved" for r in rows)} earlier resolved rows from {args.output}',
+              file=sys.stderr)
     ids = list(dict.fromkeys(i for i in (opaque_id(r) for r in rows if fit(r) >= args.min_fit) if i))
     print(f'Rows: {len(rows)}; opaque qualified ids (fit>={args.min_fit}): {len(ids)}; '
           f'estimate ${len(ids) * PROFILE_USD:.3f}; hard cap ${cap(len(ids)):.2f}' if ids else

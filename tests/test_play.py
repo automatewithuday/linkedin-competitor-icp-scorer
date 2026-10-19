@@ -464,3 +464,35 @@ class HeyReachTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 push_heyreach.push_batches(ok[:2], {'campaignId': 1, 'linkedInAccountId': 2}, 'k', path)
             self.assertEqual(json.loads(path.read_text())['batches'][0]['status'], 'unconfirmed')
+
+
+class NewUserRegressionTests(unittest.TestCase):
+    @patch('src.resolve.scrape')
+    def test_resolve_rerun_reuses_paid_results(self, scrape):
+        from src import resolve
+        row = {'name': 'J', 'icp_fit': '5', 'actor_id': 'ACoAAX', 'linkedin_url': 'https://www.linkedin.com/in/ACoAAX'}
+        with tempfile.TemporaryDirectory() as d:
+            src_, out = str(Path(d) / 'ranked.csv'), str(Path(d) / 'resolved.csv')
+            common.write_csv(src_, [row], list(row))
+            common.write_csv(out, [{**row, 'linkedin_url': 'https://www.linkedin.com/in/jane', 'location': 'London',
+                                    'resolve_status': 'resolved'}], list(row) + ['location', 'resolve_status'])
+            with patch('sys.argv', ['resolve.py', '--input', src_, '--output', out]):
+                resolve.main()
+            got = common.read_csv(out)[0][0]
+        scrape.assert_not_called()
+        self.assertEqual((got['linkedin_url'], got['resolve_status'], got['location']),
+                         ('https://www.linkedin.com/in/jane', 'resolved', 'London'))
+
+    @patch('src.activity.subprocess.run', return_value=SimpleNamespace(returncode=0))
+    def test_activity_dry_run_leaves_run_folder_untouched(self, run):
+        with tempfile.TemporaryDirectory() as d:
+            src_, out = str(Path(d) / 'ranked.csv'), str(Path(d) / 'activity.csv')
+            common.write_csv(src_, [{'name': 'J', 'linkedin_url': 'https://linkedin.com/in/jane', 'icp_fit': '5'}],
+                             ['name', 'linkedin_url', 'icp_fit'])
+            with patch('sys.argv', ['activity.py', '--input', src_, '--output', out, '--dry-run']):
+                activity.main()
+            self.assertFalse((Path(d) / 'activity').exists())
+        self.assertIn('--dry-run', run.call_args.args[0])
+
+    def test_scoring_prompt_sentences_are_terminated(self):
+        self.assertNotIn('use it Be honest', rank.SYSTEM)

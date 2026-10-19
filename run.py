@@ -5,7 +5,8 @@ Usage:
   uv run run.py --post <post-url>        --slug <slug> --icp icp.yaml --scores ... [options]   # one post only
   uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores ...                        # reuse a paid harvest
 
-Scoring: pass --scores (judgments made in-session by Claude; see src/rank.py --dump) or set OPENAI_API_KEY.
+Scoring: pass --scores (judgments made in-session; see src/rank.py --dump), or let the configured LLM score:
+OPENAI_API_KEY, else the `claude` CLI when installed (LLM_PROVIDER forces one).
 """
 import argparse
 import os
@@ -34,7 +35,7 @@ def main() -> None:
     ap.add_argument("--skip-harvest", action="store_true",
                     help="Reuse output/<slug>/posts.json + engagers.json from an earlier paid harvest")
     ap.add_argument("--scores", metavar="PATH",
-                    help="JSON judgments for rank.py (made in-session, no OpenAI). Without it OPENAI_API_KEY is required")
+                    help="JSON judgments for rank.py (made in-session, no LLM call). Without it the configured LLM scores: OPENAI_API_KEY, or the claude CLI when installed")
     ap.add_argument("--slug", required=True, help="Short identifier for this run (output folder name)")
     ap.add_argument("--output-dir", default="./output", help="Base output directory")
 
@@ -158,7 +159,7 @@ def main() -> None:
     ]
     if args.scores:
         rank_cmd += ["--scores", args.scores]
-    run_step("Score + rank engagers" + (" (in-session judgments)" if args.scores else " (OpenAI)"), rank_cmd)
+    run_step("Score + rank engagers" + (" (in-session judgments)" if args.scores else f" ({llm_provider()})"), rank_cmd)
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
     final_csv = out_csv

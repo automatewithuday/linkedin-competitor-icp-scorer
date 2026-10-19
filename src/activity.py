@@ -3,6 +3,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -58,8 +59,10 @@ def main():
     urls = list(dict.fromkeys(u for u, _ in (eligible(r, args.min_fit) for r in rows) if u))
     print(f'Rows: {len(rows)}; eligible profiles: {len(urls)}', file=sys.stderr)
     if urls:  # upstream exits 1 on an empty list; nothing eligible is a normal outcome here
-        atomic_text(work / 'input.txt', '\n'.join(urls) + '\n')  # .txt so the *.csv glob only sees upstream output
-        cmd = [sys.executable, str(TOOL), str(work / 'input.txt'), '--config', args.config, '--out', str(work)]
+        # .txt so the *.csv glob only sees upstream output; a dry run writes nothing into the run folder
+        listing = Path(tempfile.mkdtemp()) / 'input.txt' if args.dry_run else work / 'input.txt'
+        atomic_text(listing, '\n'.join(urls) + '\n')
+        cmd = [sys.executable, str(TOOL), str(listing), '--config', args.config, '--out', str(work)]
         cmd += ['--limit', str(args.limit)] if args.limit else []
         cmd += ['--dry-run'] if args.dry_run else []
         cmd += ['--from-raw', args.from_raw] if args.from_raw else []

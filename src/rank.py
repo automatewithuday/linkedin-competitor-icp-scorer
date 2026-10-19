@@ -70,7 +70,7 @@ SYSTEM = (
     "company named is plausibly an ICP account; a founder of an agency/tool in the recipient's "
     "category is a competitor (1-2).\n"
     "- Intent from a comment never raises icp_fit; score fit and intent independently.\n"
-    "When a person's line carries location or company (from their profile), that is evidence: use it "
+    "When a person's line carries location or company (from their profile), that is evidence: use it. "
     "Be honest and stingy. Most engagers on a viral post are NOT buyers -- score them 1-2. "
     "Reserve 4-5 for people whose headline genuinely matches the ICP AND who are in-house.\n\n"
     "intent (only when a comment is given; if no comment, return null):\n"

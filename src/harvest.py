@@ -224,8 +224,6 @@ def main() -> None:
             n = args.max_reactions if kind == "reaction" else args.max_comments
             # main mode: actor becomes a full profile (vanity URL, location, current company), +$0.002/engager
             payload = {"posts": [post], "maxItems": n, "profileScraperMode": "main"}
-            if kind == "comment":
-                payload["postedLimit"] = args.posted_limit
             cap = round(n * (POST_ITEM_USD + POST_PROFILE_USD) * 1.25 + 0.05, 2)
             print(f"Run: {actor} on {post}")
             print(f"  maxItems={n} spend cap=${cap:.2f}")
