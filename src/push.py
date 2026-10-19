@@ -2,6 +2,7 @@
 import argparse
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 try:
@@ -37,11 +38,13 @@ def select_leads(rows, min_fit=4, max_age_days=30):
     return leads, excluded
 
 
-def push_batches(leads, campaign_id, key, receipt_path):
+def push_batches(leads, campaign_id, key, receipt_path, before_batch=None):
     receipt = {'campaign_id': campaign_id, 'requested': len(leads), 'batches': [], 'complete': False}
     write_json(receipt_path, receipt)
     for start in range(0, len(leads), 400):
         batch = leads[start:start + 400]
+        if before_batch:
+            before_batch(batch)
         entry = {'offset': start, 'requested': len(batch), 'status': 'pending'}
         receipt['batches'].append(entry)
         write_json(receipt_path, receipt)
@@ -82,9 +85,9 @@ def main():
     if args.campaign_id <= 0 or args.max_email_age_days <= 0:
         ap.error('Campaign ID and email age must be positive')
     rows, _ = read_csv(args.input)
+    con = ledger.connect()
+    rows, dropped = ledger.filter_export_rows(con, rows, Path(args.input).parent)
     leads, excluded = select_leads(rows, args.min_fit, args.max_email_age_days)
-    con = ledger.connect()  # suppressed emails/domains and anyone already imported to any campaign
-    leads, dropped = ledger.filter_blocked(con, leads, 'linkedin_profile', 'email')
     excluded += dropped
     path = args.receipt or args.input + '.smartlead.json'
     if not args.execute:
@@ -95,7 +98,8 @@ def main():
     if not key:
         ap.error('Set SMARTLEAD_API_KEY in .env')
     try:
-        receipt = push_batches(leads, args.campaign_id, key, path)
+        receipt = push_batches(leads, args.campaign_id, key, path,
+                              ledger.export_validator(con, rows, 'linkedin_profile', 'email', Path(args.input).parent))
     except RuntimeError as exc:
         ledger.record_receipt(con, leads, path, f'smartlead:{args.campaign_id}', 'linkedin_profile', 'email')
         raise SystemExit(str(exc)) from None

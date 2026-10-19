@@ -160,9 +160,11 @@ def enrich_harvest(base, min_fit, batch_size=0, dry_run=False, refresh_misses=Fa
         write_json(base / 'engagers.json', engagers)
         rescore = base / 'rescore.json'
         pending = []  # keep indices still waiting from an earlier pass, or a partial failure would drop them
-        if rescore.exists() and not (scores and Path(scores).exists()
-                                     and Path(scores).stat().st_mtime > rescore.stat().st_mtime):
+        if rescore.exists():
             pending = json.loads(rescore.read_text(encoding='utf-8')).get('indices', [])
+            if (base / 'recipient_icp.json').exists():
+                stale = {i for i, _ in ledger.pending_scores(con, base)}
+                pending = [i for i in pending if i in stale]
         idx = list(dict.fromkeys(pending + changed))
         write_json(rescore, {'indices': idx, 'names': [engagers[i].get('name') for i in idx],
                              'why': 'location/company arrived after scoring; rescore these indices'})
@@ -188,7 +190,8 @@ def main():
                                args.refresh_misses, args.scores)
     if failed:
         print(f'{len(failed)} profile lookups failed; successful results are saved. Rerun the same command to retry only '
-              f'those (free-plan users: --batch-size 10 / run.py --resolve-batch 10), or continue without them with '
+              f'those (with --scores: run rank.py --dump and judge changed rows first; free-plan users: '
+              f'--batch-size 10 / run.py --resolve-batch 10), or continue without them with '
               f'run.py --no-resolve.', file=sys.stderr)
         sys.exit(FAILED_EXIT)
 

@@ -5,7 +5,7 @@ Writes <output-dir>/<slug>/ranked_engagers.csv.
 
 Two scorers:
   --scores PATH   judgments produced by Claude (or a human) in-session: JSON {"results": [...]} with one
-                  object per engager {i, icp_fit, intent, clean_title, company_guess}; no API key needed.
+                  object per engager {i, score_context, icp_fit, intent, clean_title, company_guess}; no API key needed.
   (default)       the configured LLM (OPENAI_API_KEY, or the `claude` CLI on a Claude subscription), ~25 per call.
   --dump          print the numbered engager list to score (headline + first comment) and exit.
 
@@ -225,15 +225,24 @@ def main() -> None:
         print(icp_block(icp))
         print(f"\nENGAGERS: {n}. {len(reused)} reuse a fresh ledger score (same evidence, ICP and rubric) and are not "
               f"shown. Score the {len(pending)} below with the rubric in rank.SYSTEM; write "
-              f"{{\"results\": [{{i, icp_fit, intent, evidence_comment, clean_title, company_guess}}]}}. "
+              f"{{\"results\": [{{i, score_context, icp_fit, intent, evidence_comment, clean_title, company_guess}}]}}. "
+              f"Copy each row's score_context exactly; it binds the judgment to this evidence, ICP and rubric. "
               f"scores.json may hold only these rows: rank.py fills the rest from the ledger.")
         lines = engager_lines(engagers, names=True)
-        print("\n".join(lines[i] for i in pending))
+        print("\n".join(lines[i] + f' | score_context: {ledger.score_context(engagers[i], icp, SYSTEM)}' for i in pending))
         return
 
     in_tok = out_tok = 0
     if args.scores:
         data = json.loads(Path(args.scores).read_text(encoding="utf-8"))
+        for r in data.get('results', []):
+            i = r.get('i')
+            if type(i) is not int or i not in range(n):
+                raise ValueError('Scorer returned invalid row identity')
+            if r.get('score_context') != ledger.score_context(engagers[i], icp, SYSTEM):
+                sys.exit(f'Stale or unbound judgment for engager {i}. Run rank.py --dump --slug {args.slug} '
+                         f'--output-dir {args.output_dir}, judge the current evidence, and copy its score_context '
+                         'into that result before retrying. No supplied scores have been recorded.')
         given = {r.get("i") for r in data.get("results", [])}
         data = {"results": data.get("results", []) + [r for i, r in reused.items() if i not in given]}
         results_all = align(data, n)
