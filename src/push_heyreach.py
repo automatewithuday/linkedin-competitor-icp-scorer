@@ -13,9 +13,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import fit, post_json, read_csv, valid_email, write_json, linkedin_url
+    from .common import fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
+    from . import ledger
 except ImportError:
-    from common import fit, post_json, read_csv, valid_email, write_json, linkedin_url
+    from common import fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
+    import ledger
 
 BASE = 'https://api.heyreach.io/api/public'
 BATCH = 100  # HeyReach cap per request
@@ -37,7 +39,7 @@ def select_leads(rows, min_fit=4, drafts=None):
         raw = (row.get('linkedin_url') or '').strip()
         # Apify often returns member-ID URLs (/in/ACoAA...). LinkedIn resolves them, HeyReach accepts them.
         url = linkedin_url(raw) or (raw if re.fullmatch(r'https://www\.linkedin\.com/in/ACoAA[\w-]+/?', raw) else '')
-        if not url or url in seen or fit(row) < min_fit or row.get('suppressed', '').lower() == 'true':
+        if not url or url in seen or fit(row) < min_fit or row.get('suppressed', '').lower() == 'true' or not ledger_ok(row):
             excluded += 1
             continue
         seen.add(url)
@@ -105,6 +107,10 @@ def main():
         ap.error('IDs must be positive')
     rows, _ = read_csv(args.input)
     leads, excluded = select_leads(rows, args.min_fit, load_drafts(args.input))
+    con = ledger.connect()  # suppressed people and anyone already imported to any campaign
+    leads, dropped = ledger.filter_blocked(con, leads, 'profileUrl', 'emailAddress')
+    excluded += dropped
+    campaign = f"heyreach:list:{args.list_id}" if args.list_id else f"heyreach:campaign:{args.campaign_id}"
     path = args.receipt or args.input + '.heyreach.json'
     if not args.execute:
         write_json(path, {'preview': True, **target, 'eligible': len(leads), 'excluded': excluded, 'leads': leads})
@@ -116,7 +122,9 @@ def main():
     try:
         receipt = push_batches(leads, target, key, path)
     except RuntimeError as exc:
+        ledger.record_receipt(con, leads, path, campaign, 'profileUrl', 'emailAddress')
         raise SystemExit(str(exc)) from None
+    ledger.record_receipt(con, leads, path, campaign, 'profileUrl', 'emailAddress')
     b = receipt['batches']
     print(f'Added: {sum(x["addedLeadsCount"] for x in b)}; updated: {sum(x["updatedLeadsCount"] for x in b)}; '
           f'failed: {sum(x["failedLeadsCount"] for x in b)}. Receipt: {path}')

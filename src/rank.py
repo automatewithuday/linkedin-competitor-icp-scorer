@@ -25,8 +25,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 try:
     from .common import in_session_guard, write_csv, llm_json, llm_provider
+    from . import ledger
 except ImportError:
     from common import in_session_guard, write_csv, llm_json, llm_provider
+    import ledger
 
 load_dotenv()
 
@@ -216,17 +218,28 @@ def main() -> None:
 
     engagers, icp, base = load_inputs(args.slug, args.output_dir)
     n = len(engagers)
+    con = ledger.connect()
+    reused = ledger.fresh_scores(con, engagers, icp, SYSTEM)  # same person, evidence, ICP and rubric: no rescoring
     if args.dump:
+        pending = [i for i in range(n) if i not in reused]
         print(icp_block(icp))
-        print(f"\nENGAGERS ({n}). Score each with the rubric in rank.SYSTEM; write {{\"results\": [{{i, icp_fit, intent, evidence_comment, clean_title, company_guess}}]}}")
-        print("\n".join(engager_lines(engagers, names=True)))
+        print(f"\nENGAGERS: {n}. {len(reused)} reuse a fresh ledger score (same evidence, ICP and rubric) and are not "
+              f"shown. Score the {len(pending)} below with the rubric in rank.SYSTEM; write "
+              f"{{\"results\": [{{i, icp_fit, intent, evidence_comment, clean_title, company_guess}}]}}. "
+              f"scores.json may hold only these rows: rank.py fills the rest from the ledger.")
+        lines = engager_lines(engagers, names=True)
+        print("\n".join(lines[i] for i in pending))
         return
 
     in_tok = out_tok = 0
     if args.scores:
-        results_all = align(json.loads(Path(args.scores).read_text(encoding="utf-8")), n)
-        scored = [(engagers, results_all)]
-        print(f"[{args.slug}] using {n} judgments from {args.scores} (no OpenAI call)")
+        data = json.loads(Path(args.scores).read_text(encoding="utf-8"))
+        given = {r.get("i") for r in data.get("results", [])}
+        data = {"results": data.get("results", []) + [r for i, r in reused.items() if i not in given]}
+        results_all = align(data, n)
+        scorer = "in-session"
+        print(f"[{args.slug}] {len(given & set(range(n)))} judgments from {args.scores}, "
+              f"{n - len(given & set(range(n)))} reused from the ledger (no LLM call)")
     else:
         guard = in_session_guard()
         if guard:
@@ -236,15 +249,20 @@ def main() -> None:
             sys.exit("No scorer: pass --scores PATH (judgments made in-session), set OPENAI_API_KEY, "
                      "or install the `claude` CLI and log in (LLM_PROVIDER=claude)")
         icp_text = icp_block(icp)
-        print(f"[{args.slug}] scoring {n} engagers with {provider} in batches of {BATCH_SIZE} ...")
-        scored = []
-        for start in range(0, n, BATCH_SIZE):
-            batch = engagers[start:start + BATCH_SIZE]
-            results, bi, bo = score_batch(icp_text, batch)
+        pending = [i for i in range(n) if i not in reused]
+        print(f"[{args.slug}] {len(reused)} reused from the ledger; scoring {len(pending)} with {provider} "
+              f"in batches of {BATCH_SIZE} ...")
+        by_i = dict(reused)
+        for start in range(0, len(pending), BATCH_SIZE):
+            idx = pending[start:start + BATCH_SIZE]
+            results, bi, bo = score_batch(icp_text, [engagers[i] for i in idx])
             in_tok += bi
             out_tok += bo
-            scored.append((batch, results))
-            print(f"  batch {start // BATCH_SIZE + 1}: {start + len(batch)}/{n} scored")
+            by_i.update({i: {**r, "i": i} for i, r in zip(idx, results)})
+            print(f"  batch {start // BATCH_SIZE + 1}: {start + len(idx)}/{len(pending)} scored")
+        results_all = [by_i[i] for i in range(n)]
+        scorer = provider
+    scored = [(engagers, results_all)]
 
     rows = []
     for batch, results in scored:
@@ -307,6 +325,7 @@ def main() -> None:
             "linkedin_url", "comment_excerpt", "actor_id", "source_profile", "post_ids", "post_urls", "resolve_status",
             "comment_post_url", "company_source"]
     write_csv(out_path, rows, cols)
+    ledger.record_scores(con, engagers, results_all, icp, SYSTEM, scorer, args.slug)
 
     qualified = [r for r in rows if r["icp_fit"] >= args.min_fit]
     high_intent = [r for r in rows if r["intent"] == "high"]

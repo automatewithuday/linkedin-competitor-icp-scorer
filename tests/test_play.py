@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import tempfile
@@ -7,7 +8,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src import activity, common, email_enrich, harvest, icp, push, rank, resolve, summary, supabase_export
+os.environ['LEDGER_DB'] = ':memory:'  # tests never touch data/ledger.sqlite; ledger tests use their own file
+
+from src import activity, common, ledger, email_enrich, harvest, icp, push, rank, resolve, summary, supabase_export
 
 
 def verified_row(**changes):
@@ -633,3 +636,120 @@ class ReviewFindingTests(unittest.TestCase):
             rows, fields = common.read_csv(base / 'drafts.csv')
         llm.assert_not_called()
         self.assertEqual((rows, fields[:2]), ([], ['rank', 'name']))
+
+
+class LedgerTests(unittest.TestCase):
+    """The ledger rules from the design: one person across runs, stale-on-change scores, no repeat outreach."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = str(Path(self.tmp.name) / 'ledger.sqlite')
+        self.env = patch.dict('os.environ', {'LEDGER_DB': self.db, 'APIFY_TOKEN': 'test-dummy'})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop(); self.tmp.cleanup()
+
+    def run_dir(self, slug, engagers, icp=None):
+        base = Path(self.tmp.name) / slug; base.mkdir()
+        (base / 'engagers.json').write_text(json.dumps(engagers)); (base / 'recipient_icp.json').write_text(json.dumps(icp or {'titles': ['CRO']}))
+        return base
+
+    def test_one_person_across_runs_and_aliases(self):
+        con = ledger.connect()
+        ledger.ingest(con, self.run_dir('a', [{'id': 'ACoAA1', 'name': 'J', 'posts_touched': ['p1'], 'comments': ['hi'], 'comment_post_ids': ['p1']}]))
+        ledger.ingest(con, self.run_dir('b', [{'id': 'x', 'name': 'J', 'linkedinUrl': 'https://www.linkedin.com/in/jane', 'posts_touched': ['p2']}]))
+        self.assertEqual(con.execute('SELECT COUNT(*) FROM contacts').fetchone()[0], 2)  # nothing links them yet
+        new, seen = ledger.ingest(con, self.run_dir('c', [{'id': 'ACoAA1', 'linkedinUrl': 'https://www.linkedin.com/in/jane', 'posts_touched': ['p1']}]))
+        self.assertEqual((new, seen, con.execute('SELECT COUNT(*) FROM contacts').fetchone()[0]), (0, 1, 1))  # merged
+        ledger.ingest(con, Path(self.tmp.name) / 'a')  # re-ingest: engagements are never inserted twice
+        self.assertEqual(con.execute('SELECT COUNT(*) FROM engagements').fetchone()[0], 3)
+
+    def test_location_change_makes_score_stale_until_rescored(self):
+        con = ledger.connect()
+        e = {'id': 'ACoAA1', 'name': 'J', 'position': 'CRO', 'location': ''}
+        icp = {'titles': ['CRO']}
+        ledger.record_scores(con, [e], [{'icp_fit': 4, 'intent': None}], icp, 'rubric', 'in-session', 'a')
+        self.assertEqual(list(ledger.fresh_scores(con, [e], icp, 'rubric')), [0])
+        moved = {**e, 'location': 'Mumbai, India'}
+        self.assertEqual(ledger.fresh_scores(con, [moved], icp, 'rubric'), {})                    # evidence changed
+        self.assertEqual(ledger.fresh_scores(con, [e], {'titles': ['VP Sales']}, 'rubric'), {})   # other ICP
+        self.assertEqual(ledger.fresh_scores(con, [e], icp, 'new rubric'), {})                    # rubric changed
+        icp_id = ledger.icp_version(con, icp)
+        self.assertEqual(ledger.status_for(con, ['id:ACoAA1'], icp_id, ledger.rubric_hash('rubric'),
+                                           ledger.evidence_hash(moved)), 'stale_score')
+        ledger.record_scores(con, [moved], [{'icp_fit': 2, 'intent': None}], icp, 'rubric', 'in-session', 'a')
+        self.assertEqual(ledger.status_for(con, ['id:ACoAA1'], icp_id, ledger.rubric_hash('rubric'),
+                                           ledger.evidence_hash(moved)), 'eligible')
+        self.assertEqual(ledger.fresh_scores(con, [moved], icp, 'rubric')[0]['icp_fit'], 2)
+
+    def test_scores_belong_to_contact_and_icp(self):
+        con = ledger.connect()
+        e = {'id': 'ACoAA1', 'position': 'CRO'}
+        ledger.record_scores(con, [e], [{'icp_fit': 5}], {'client': 'A'}, 'r', 's', 'x')
+        ledger.record_scores(con, [e], [{'icp_fit': 1}], {'client': 'B'}, 'r', 's', 'x')
+        self.assertEqual((ledger.fresh_scores(con, [e], {'client': 'A'}, 'r')[0]['icp_fit'],
+                          ledger.fresh_scores(con, [e], {'client': 'B'}, 'r')[0]['icp_fit']), (5, 1))
+
+    def test_rank_reuses_fresh_scores_and_dump_hides_them(self):
+        engs = [{'id': 'ACoAA1', 'name': 'Seen', 'position': 'CRO'}, {'id': 'ACoAA2', 'name': 'New', 'position': 'CTO'}]
+        base = self.run_dir('s', engs)
+        ledger.record_scores(ledger.connect(), engs[:1], [{'icp_fit': 5, 'intent': None, 'clean_title': 'CRO'}],
+                             {'titles': ['CRO']}, rank.SYSTEM, 'in-session', 'old')
+        out = io.StringIO()
+        with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--dump']), patch('sys.stdout', out):
+            rank.main()
+        self.assertIn('1. New', out.getvalue()); self.assertNotIn('0. Seen', out.getvalue())
+        scores = Path(self.tmp.name) / 'scores.json'
+        scores.write_text(json.dumps({'results': [{'i': 1, 'icp_fit': 2, 'intent': None}]}))  # only the pending row
+        with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--scores', str(scores)]):
+            rank.main()
+        rows = {r['name']: r['icp_fit'] for r in common.read_csv(base / 'ranked_engagers.csv')[0]}
+        self.assertEqual(rows, {'Seen': '5', 'New': '2'})
+
+    @patch('src.resolve.scrape')
+    def test_lookups_are_shared_across_runs(self, scrape):
+        from src import resolve
+        scrape.return_value = ({'ACoAA1': profile('ACoAA1', 'jane', 'Austin, Texas', 'Acme')}, True, 'r1')
+        for slug in ('first', 'second'):
+            base = self.run_dir(slug, [opaque('ACoAA1', 'Jane')])
+            common.write_csv(base / 'ranked_engagers.csv', [{'actor_id': 'ACoAA1', 'icp_fit': '4'}], ['actor_id', 'icp_fit'])
+            changed, failed = resolve.enrich_harvest(base, 3)
+            self.assertEqual((changed, failed), ([0], []))  # second run: evidence still goes back to scoring
+        self.assertEqual(scrape.call_count, 1)  # but it is paid for once
+        e = json.loads((Path(self.tmp.name) / 'second' / 'engagers.json').read_text())[0]
+        self.assertEqual((e['linkedinUrl'], e['location'], e['company']), ('https://www.linkedin.com/in/jane', 'Austin, Texas', 'Acme'))
+
+    def test_campaign_history_and_suppression_block_repeat_outreach(self):
+        con = ledger.connect()
+        leads = [{'linkedin_profile': 'https://www.linkedin.com/in/jane', 'email': 'jane@acme.com'},
+                 {'linkedin_profile': 'https://www.linkedin.com/in/bob', 'email': 'bob@beta.io'}]
+        receipt = Path(self.tmp.name) / 'r.json'
+        receipt.write_text(json.dumps({'batches': [{'offset': 0, 'requested': 1, 'status': 'confirmed'},
+                                                   {'offset': 1, 'requested': 1, 'status': 'unconfirmed'}]}))
+        self.assertEqual(ledger.record_receipt(con, leads, receipt, 'smartlead:1', 'linkedin_profile', 'email'), 1)
+        self.assertEqual(ledger.blocked(con, 'https://linkedin.com/in/Jane/'), 'in_campaign:smartlead:1')
+        self.assertIsNone(ledger.blocked(con, 'https://www.linkedin.com/in/bob'))  # unconfirmed: reconcile, not block
+        con.execute("INSERT INTO suppressions VALUES ('domain:beta.io', 'customer', 'now')")
+        self.assertEqual(ledger.blocked(con, None, 'BOB@beta.io'), 'suppressed:customer')
+        kept, dropped = ledger.filter_blocked(con, leads, 'linkedin_profile', 'email')
+        self.assertEqual((kept, dropped), ([], 2))
+
+    def test_gate_stamps_rows_and_downstream_respects_it(self):
+        engs = [{'id': 'ACoAA1', 'name': 'Jane', 'linkedinUrl': 'https://www.linkedin.com/in/jane', 'position': 'CRO'},
+                {'id': 'ACoAA2', 'name': 'Bob', 'linkedinUrl': 'https://www.linkedin.com/in/bob', 'position': 'CRO'}]
+        base = self.run_dir('g', engs)
+        con = ledger.connect()
+        icp = json.loads((base / 'recipient_icp.json').read_text())
+        ledger.record_scores(con, engs, [{'icp_fit': 5}, {'icp_fit': 5}], icp, rank.SYSTEM, 'in-session', 'g')
+        con.execute("INSERT INTO suppressions VALUES ('url:https://www.linkedin.com/in/bob', 'teammate', 'now')"); con.commit()
+        common.write_csv(base / 'ranked_engagers.csv',
+                         [{'name': e['name'], 'icp_fit': '5', 'actor_id': e['id'], 'linkedin_url': e['linkedinUrl']} for e in engs],
+                         ['name', 'icp_fit', 'actor_id', 'linkedin_url'])
+        self.assertEqual(ledger.gate(con, base), {'eligible': 1, 'suppressed': 1})
+        rows = {r['name']: r for r in common.read_csv(base / 'ranked_engagers.csv')[0]}
+        self.assertEqual(rows['Bob']['ledger_status'], 'suppressed:teammate')
+        self.assertEqual(activity.eligible(rows['Bob'], 4), ('', 'ledger_suppressed'))
+        self.assertEqual(activity.eligible(rows['Jane'], 4)[1], '')
+        self.assertEqual(len(push.select_leads([{**verified_row(), **rows['Bob']}])[0]), 0)
+        self.assertIn('Ledger gate', '\n'.join(summary.summarize(list(rows.values()))))

@@ -14,6 +14,9 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
                  (post mode also returns each person's location + employer)
             │
             ▼
+    Ledger       Remember each person across runs and competitors      data/ledger.sqlite
+            │
+            ▼
  2. Load ICP     Read who you sell to from icp.yaml                             (you)
             │
             ▼
@@ -28,6 +31,10 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
             ▼
  5. Rank         Qualified (fit 4–5) first, then fit × engagement × intent    ──▶  ranked_engagers.csv
             │
+            ▼
+    Gate         Skip anyone suppressed, already in a campaign, or scored on
+                 stale evidence. Every step below takes only eligible rows.
+            │
             ▼  (optional flags)
  6. Activity     Is each qualified lead active on LinkedIn right now?           ──▶  activity.csv
  7. Draft        Connection note + DM per qualified lead, one playbook template ──▶  drafts.csv
@@ -39,7 +46,7 @@ When a competitor's founder posts on LinkedIn, the people who like and comment a
  Summary         Counts + the top leads by name, printed at the end of every run
 ```
 
-Steps 1 to 5 always run. Steps 6 to 9 are opt-in flags (`--activity`, `--draft`, `--find-emails`, `--campaign-id` / `--heyreach-list-id`). Nothing sends without a separate `--execute`.
+Steps 1 to 5, the ledger and the gate always run. Steps 6 to 9 are opt-in flags (`--activity`, `--draft`, `--find-emails`, `--campaign-id` / `--heyreach-list-id`). Nothing sends without a separate `--execute`.
 
 ## What you get
 
@@ -98,6 +105,7 @@ Open `output/first-test/ranked_engagers.csv`. That run costs well under a dollar
 - **Who is actually on LinkedIn right now.** `--activity` checks each qualified lead's recent posts, comments and reactions and adds an outreach-ready verdict (about $0.04 per profile, needs `TYPESAFE_API_KEY`). See [docs/OPERATIONS.md](docs/OPERATIONS.md#linkedin-activity-check-optional).
 - **No lost reactors.** Reaction-only engagers come back from LinkedIn with opaque ids; the pipeline resolves the qualified ones to public URLs so they can be emailed and checked. See [docs/OPERATIONS.md](docs/OPERATIONS.md#opaque-profile-ids).
 - **A summary you can read in chat.** Every run ends with counts and the top rows by name, so you never have to open the CSV.
+- **Memory across runs.** A local SQLite ledger keeps one record per person across every run and competitor: their engagements, profile evidence, lookups, scores per ICP, and campaign history. A score is reused only while its evidence, ICP and rubric are unchanged; anyone already imported to a campaign, or on your do-not-contact list, is never pushed again. See [docs/OPERATIONS.md](docs/OPERATIONS.md#ledger-sqlite).
 - **Scoring without an API key.** In Claude Code the agent judges the engagers itself and hands the pipeline a `scores.json`. See [docs/OPERATIONS.md](docs/OPERATIONS.md#scoring-llm).
 
 ## Defining your ICP (the part most people get stuck on)
@@ -132,6 +140,7 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 |---|---|
 | Apify harvest | profile mode: about $0.002 per item. 3 posts with small caps is under $0.20; 10 posts at default caps is $2 to $3. Single post (`--post`): about $0.004 per engager, full profiles included. |
 | Resolve hidden profile ids | $0.004 per candidate (fit 3+) with an opaque id, resolved before final scoring so location counts; on by default, `--no-resolve` skips it. Reruns reuse earlier results. |
+| Ledger (`data/ledger.sqlite`) | free; local file, no service. |
 | Activity check (`--activity`) | about $0.04 per qualified profile (Apify) plus a negligible TypeSafe charge. |
 | Scoring with OpenAI | under one cent per 100 engagers on `gpt-4.1-mini`. |
 | Scoring with Claude subscription | no dollars; counts against your plan's usage limits. |
@@ -152,6 +161,7 @@ src/email_enrich.py   Prospeo
 src/push_heyreach.py  HeyReach list/campaign push (LinkedIn)
 src/push.py           Smartlead preview / import
 src/summary.py        the end-of-run summary with names
+src/ledger.py         SQLite ledger: people, engagements, evidence, scores per ICP, campaigns, suppressions
 src/common.py         shared helpers, including the OpenAI-or-Claude switch
 activity.toml         activity-check caps, threshold and question wording (yours to tune)
 .claude/commands/     /setup, /first-run, /weekly-sweep for Claude Code

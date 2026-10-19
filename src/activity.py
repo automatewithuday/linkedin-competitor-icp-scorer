@@ -8,10 +8,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import atomic_text, fit, linkedin_url, read_csv, write_csv
+    from .common import atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from .activity_intel import username
 except ImportError:
-    from common import atomic_text, fit, linkedin_url, read_csv, write_csv
+    from common import atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from activity_intel import username
 
 FIELDS = ['linkedin_outreach_ready', 'outreach_ready_probability', 'outreach_reason', 'activity_status',
@@ -24,6 +24,8 @@ def eligible(row, min_fit):
     """-> (normalized public URL or '', miss reason or '')."""
     if fit(row) < min_fit:
         return '', 'below_min_fit'
+    if not ledger_ok(row):
+        return '', 'ledger_' + row['ledger_status'].split(':')[0]
     url = linkedin_url(row.get('linkedin_url'))
     return (url, '') if url else ('', 'no_public_url')
 

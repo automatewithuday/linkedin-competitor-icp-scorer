@@ -8,9 +8,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import fit, linkedin_url, post_json, read_csv, valid_email, write_csv, write_json
+    from .common import fit, ledger_ok, linkedin_url, post_json, read_csv, valid_email, write_csv, write_json
 except ImportError:
-    from common import fit, linkedin_url, post_json, read_csv, valid_email, write_csv, write_json
+    from common import fit, ledger_ok, linkedin_url, post_json, read_csv, valid_email, write_csv, write_json
 
 FIELDS = ['email', 'email_status', 'sendable', 'email_provider', 'email_checked_at', 'miss_reason']
 
@@ -81,6 +81,8 @@ def main():
         data = identity(row)
         if fit(row) < args.min_fit:
             result['miss_reason'] = 'below_min_fit'
+        elif not ledger_ok(row):  # suppressed, already in a campaign, or stale score: no Prospeo spend
+            result['miss_reason'] = 'ledger_' + row['ledger_status'].split(':')[0]
         elif not data:
             result['miss_reason'] = 'missing_reliable_identity'
         else:

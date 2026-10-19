@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 try:
-    from .common import fit, post_json, read_csv, valid_email, write_json
+    from .common import fit, ledger_ok, post_json, read_csv, valid_email, write_json
+    from . import ledger
 except ImportError:
-    from common import fit, post_json, read_csv, valid_email, write_json
+    from common import fit, ledger_ok, post_json, read_csv, valid_email, write_json
+    import ledger
 
 
 def select_leads(rows, min_fit=4, max_age_days=30):
@@ -22,7 +24,7 @@ def select_leads(rows, min_fit=4, max_age_days=30):
         if (not valid_email(email) or email in seen or fit(row) < min_fit or not fresh
                 or row.get('sendable', '').lower() != 'true'
                 or row.get('email_status', '').upper() != 'VERIFIED'
-                or row.get('suppressed', '').lower() == 'true'):
+                or row.get('suppressed', '').lower() == 'true' or not ledger_ok(row)):
             excluded += 1
             continue
         seen.add(email)
@@ -81,6 +83,9 @@ def main():
         ap.error('Campaign ID and email age must be positive')
     rows, _ = read_csv(args.input)
     leads, excluded = select_leads(rows, args.min_fit, args.max_email_age_days)
+    con = ledger.connect()  # suppressed emails/domains and anyone already imported to any campaign
+    leads, dropped = ledger.filter_blocked(con, leads, 'linkedin_profile', 'email')
+    excluded += dropped
     path = args.receipt or args.input + '.smartlead.json'
     if not args.execute:
         write_json(path, {'preview': True, 'campaign_id': args.campaign_id, 'eligible': len(leads), 'excluded': excluded, 'leads': leads})
@@ -92,7 +97,9 @@ def main():
     try:
         receipt = push_batches(leads, args.campaign_id, key, path)
     except RuntimeError as exc:
+        ledger.record_receipt(con, leads, path, f'smartlead:{args.campaign_id}', 'linkedin_profile', 'email')
         raise SystemExit(str(exc)) from None
+    ledger.record_receipt(con, leads, path, f'smartlead:{args.campaign_id}', 'linkedin_profile', 'email')
     print(f'Added: {sum(b["added"] for b in receipt["batches"])}; skipped: {sum(b["skipped"] for b in receipt["batches"])}. Receipt: {path}')
 
 

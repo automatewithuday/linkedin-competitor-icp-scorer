@@ -213,3 +213,36 @@ Standalone, dry-run first (prints the lookup count, the estimate and the cap; sp
 uv run src/resolve.py --slug competitor-2026-09-16 --dry-run
 uv run src/resolve.py --slug competitor-2026-09-16 --batch-size 10   # then rescore the indices in rescore.json
 ```
+
+## Ledger (SQLite)
+
+`src/ledger.py` keeps a local SQLite file, `data/ledger.sqlite` (override with `LEDGER_DB`; git-ignored). CSVs remain the per-run output; the ledger is the memory across runs, competitors and campaigns. It uses Python's built-in `sqlite3`, so there is nothing to install or host.
+
+| Record | Purpose |
+|---|---|
+| `contacts`, `aliases` | One person across runs. Aliases link the opaque id (`id:ACoAA...`) and the public URL (`url:...`); two records that turn out to be one person are merged. |
+| `engagements` | Each comment and post touch, tied to its post. Re-ingesting a run never inserts the same engagement twice. |
+| `profile_snapshots`, `lookups` | Headline, location and employer over time; every profile lookup (resolved or not found, with date), shared by all runs. |
+| `icp_versions`, `scores` | A score belongs to a contact **and** an ICP version, and stores the evidence hash and rubric hash it was made from. The same person can qualify for one client and fail another. |
+| `campaign_contacts`, `suppressions` | Imports per campaign, outreach status, and do-not-contact entries by URL, email or domain. |
+
+**Rules**
+
+- **Fresh or stale.** A score is fresh only while the person's evidence (headline, location, employer, comments), the ICP version and the scoring rubric (`rank.SYSTEM`) all match. Location changes, so the score is stale, so the person waits for rescoring, and the new qualification decides export eligibility.
+- **Rescore only when necessary.** `rank.py --dump` lists only people without a fresh score; `rank.py` fills the rest from the ledger, so `scores.json` may contain just the new rows. Automatic scorers skip them too.
+- **Pay once.** Profile lookups made in any run are reused by every later run, and still go back through scoring as new evidence.
+- **Gate before anything costs or sends.** After final scoring, `run.py` stamps `ledger_status` on every row: `eligible`, `stale_score`, `suppressed:<reason>` or `in_campaign:<campaign>`. Activity, drafts, Prospeo, Smartlead and HeyReach only take `eligible` rows. The push stages also check email and domain suppressions.
+- **No repeat outreach.** Every provider-confirmed batch of a `--execute` push is recorded as `imported`; that person is then out of every later push, in any campaign. Unconfirmed batches are recorded as `unconfirmed` and do not block: reconcile them in the provider first.
+
+**Commands**
+
+```bash
+uv run src/ledger.py stats                                          # people, repeats, lookups, stale scores, campaigns
+uv run src/ledger.py suppress --csv customers.csv --reason customer # linkedin_url and/or email columns
+uv run src/ledger.py suppress --domain mycompany.com --reason teammate
+uv run src/ledger.py mark --campaign smartlead:123 --status replied --url https://www.linkedin.com/in/jane
+uv run src/ledger.py ingest --slug <slug>    # run.py does this after every harvest; safe to repeat
+uv run src/ledger.py gate --slug <slug>      # run.py does this after final scoring
+```
+
+The ledger only knows what this tool recorded: replies, unsubscribes and sends inside Smartlead or HeyReach are not synced back (record them with `mark`), and Smartlead's own duplicate, block-list and unsubscribe checks stay on. Supabase remains an optional snapshot export; for a shared multi-client service the same model could live there.

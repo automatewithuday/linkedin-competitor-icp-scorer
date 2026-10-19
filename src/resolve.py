@@ -23,9 +23,11 @@ from dotenv import load_dotenv
 try:
     from .common import fit, linkedin_url, read_csv, write_json
     from .harvest import profile_fields
+    from . import ledger
 except ImportError:
     from common import fit, linkedin_url, read_csv, write_json
     from harvest import profile_fields
+    import ledger
 
 ACTOR = 'harvestapi/linkedin-profile-scraper'
 MODE = 'Profile details no email ($4 per 1k)'
@@ -88,6 +90,21 @@ def enrich_harvest(base, min_fit, batch_size=0, dry_run=False, refresh_misses=Fa
                 e['location'] = e.get('location') or hit.get('location', '')
                 changed.append(i)
 
+    con = ledger.connect()  # lookups other runs already paid for: same rules, no new spend
+    shared = 0
+    for i, e in enumerate(engagers):
+        if fits.get(e.get('id'), 0) < min_fit or linkedin_url(e.get('linkedinUrl')) or not (e.get('id') or '').startswith('ACoAA'):
+            continue
+        hit = ledger.cached_lookup(con, e['id'])
+        if hit and hit['status'] == 'resolved' and linkedin_url(hit['public_url']):
+            e['linkedinUrl'], e['resolve_status'] = linkedin_url(hit['public_url']), 'resolved'
+            e['location'] = e.get('location') or hit.get('location') or ''
+            e['company'] = e.get('company') or hit.get('company') or ''
+            changed.append(i); shared += 1
+        elif hit and hit['status'] == 'not_found' and e.get('resolve_status') != 'not_found':
+            e['resolve_status'], e['resolve_checked_at'] = 'not_found', hit['checked_at']
+    if shared:
+        print(f'Reused {shared} profile lookups from earlier runs (ledger)', file=sys.stderr)
     todo = [i for i, e in enumerate(engagers)
             if fits.get(e.get('id'), 0) >= min_fit and not linkedin_url(e.get('linkedinUrl'))
             and (e.get('id') or '').startswith('ACoAA') and not fresh_miss(e, now, refresh_misses)]
@@ -127,11 +144,14 @@ def enrich_harvest(base, min_fit, batch_size=0, dry_run=False, refresh_misses=Fa
                     e['company'] = e.get('company') or company
                     e['resolve_status'] = 'resolved'
                     changed.append(i)
+                    ledger.record_lookup(con, pid, 'resolved', e['linkedinUrl'], run_id, e)
                 elif ok:  # complete run, id absent: a real miss, cached so it is not paid for again
                     e['resolve_status'], e['resolve_checked_at'] = 'not_found', now.isoformat(timespec='seconds')
+                    ledger.record_lookup(con, pid, 'not_found', None, run_id)
                 elif pid not in failed:
                     failed.append(pid)
         write_json(base / 'engagers.json', engagers)  # persist every paid batch before the next one runs
+        con.commit()
 
     if runs:
         log = base / 'resolve_runs.json'

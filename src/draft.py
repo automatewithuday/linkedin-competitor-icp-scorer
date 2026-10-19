@@ -14,9 +14,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import read_csv, write_csv, llm_json
+    from .common import ledger_ok, read_csv, write_csv, llm_json
 except ImportError:
-    from common import read_csv, write_csv, llm_json
+    from common import ledger_ok, read_csv, write_csv, llm_json
 
 load_dotenv()
 
@@ -116,7 +116,7 @@ def main() -> None:
     todo = []
     for r in rows:
         fit = int(r["icp_fit"])
-        if fit < args.min_fit:
+        if fit < args.min_fit or not ledger_ok(r):
             continue
         t = pick_template(fit, r.get("intent") or "low", r.get("comment_excerpt") or "")
         if not t:

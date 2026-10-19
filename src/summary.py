@@ -25,6 +25,9 @@ def summarize(rows, top=20, min_fit=4):
     if 'resolve_status' in cols:
         lines.append(f"Profile lookups (opaque ids -> public URLs): "
                      f"{dict(Counter(r['resolve_status'] or 'not_needed' for r in rows))}")
+    if 'ledger_status' in cols:
+        lines.append(f"Ledger gate (eligible for activity, drafts, emails, pushes): "
+                     f"{dict(Counter(r['ledger_status'].split(':')[0] for r in rows))}")
     if 'activity_status' in cols:
         checked = [r for r in rows if not r.get('activity_miss_reason')]
         miss = Counter(r['activity_miss_reason'] for r in rows if r.get('activity_miss_reason'))

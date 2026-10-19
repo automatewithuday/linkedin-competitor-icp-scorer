@@ -174,3 +174,9 @@ def _claude_cli_json(system, user, model):
     u = out.get('usage') or {}
     in_tok = u.get('input_tokens', 0) + u.get('cache_read_input_tokens', 0) + u.get('cache_creation_input_tokens', 0)
     return json.loads(text), in_tok, u.get('output_tokens', 0)
+
+
+def ledger_ok(row):
+    """False when the ledger gate marked this row suppressed, already in a campaign, or scored on stale evidence.
+    Rows from CSVs that never went through the gate count as eligible."""
+    return (row.get('ledger_status') or 'eligible') == 'eligible'

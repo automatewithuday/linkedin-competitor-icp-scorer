@@ -142,6 +142,9 @@ def main() -> None:
         ]
         run_step("Enrich engager companies", enrich_cmd)
 
+    # Step 2b: ledger. One record per person across runs; engagements and profile evidence (local SQLite).
+    run_step("Record harvest in ledger", [py, "src/ledger.py", "ingest", "--slug", slug, "--output-dir", out])
+
     # Step 3: ICP
     icp_cmd = [
         py, "src/icp.py",
@@ -187,6 +190,9 @@ def main() -> None:
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
     final_csv = out_csv
+    # Step 4c: ledger gate. Stamps ledger_status; every later stage takes only `eligible` rows (not suppressed,
+    # not already in a campaign, scored on the current evidence, ICP and rubric).
+    run_step("Ledger gate", [py, "src/ledger.py", "gate", "--slug", slug, "--output-dir", out])
     if args.draft:
         run_step("Draft outreach copy", [py, "src/draft.py", "--slug", slug, "--output-dir", out,
                  "--min-fit", str(max(3, args.min_fit))])
