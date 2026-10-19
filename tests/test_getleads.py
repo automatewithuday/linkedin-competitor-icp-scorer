@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 import requests
 import run as pipeline
-from src import common, getleads, icp, ledger, rank, summary
+from src import common, email_enrich, getleads, icp, ledger, rank, summary
 
 
 class GetLeadsTests(unittest.TestCase):
@@ -69,7 +69,7 @@ class GetLeadsTests(unittest.TestCase):
             rank.main()
         return scores
 
-    def test_batch_contract_correlates_reordered_results_and_discards_email(self):
+    def test_batch_contract_correlates_results_and_keeps_work_email_out_of_scoring(self):
         urls = [self.person(i)['linkedinUrl'] for i in (1, 2)]
         payload = {'ok': True, 'results': [
             {'linkedinUrl': urls[1], 'success': False, 'data': None},
@@ -78,7 +78,11 @@ class GetLeadsTests(unittest.TestCase):
             result = getleads.enrich_batch(urls, 'offline')
         self.assertEqual(result[urls[1]], ('not_found', {}))
         self.assertEqual(result[urls[0]][1]['company_size'], '51 to 200')
-        self.assertNotIn('discard', json.dumps(result))
+        self.assertEqual(result[urls[0]][1]['work_email'], 'discard@acme.example')
+        person = self.person()
+        getleads.apply(person, result[urls[0]][1], ledger.now())
+        self.assertNotIn('discard', json.dumps(person))
+        self.assertNotIn('cellphone', json.dumps(result))
         self.assertEqual(req.call_args.kwargs['json']['items'], [{'linkedin_url': u} for u in urls])
 
     def test_ambiguous_or_wrong_person_response_never_attaches_evidence(self):
@@ -245,19 +249,19 @@ class GetLeadsTests(unittest.TestCase):
         e['icp_enrichment']['company_size'] = '10001+'
         self.assertNotEqual(before, ledger.evidence_hash(e))
 
-    def test_pipeline_requires_rescore_then_reuses_paid_enrichment_without_new_calls(self):
+    def test_pipeline_rescores_then_reuses_one_paid_response_for_icp_and_email(self):
         base = self.seed()
         manual = self.root / 'icp.yaml'
         manual.write_text('titles: [VP Sales]\nindustries: [Software Development]\ngeos: [United States]\ncompany_size: {min: 50, max: 500}\n')
         icp.derive_from_yaml(str(manual), base.name, base)
         scores = self.score(base)
         modules = {'src/ledger.py': ledger, 'src/icp.py': icp, 'src/rank.py': rank,
-                   'src/getleads.py': getleads, 'src/summary.py': summary}
+                   'src/getleads.py': getleads, 'src/email_enrich.py': email_enrich, 'src/summary.py': summary}
         def execute(label, cmd):
             with patch('sys.argv', cmd[1:]):
                 modules[cmd[1]].main()
         args = ['run.py', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
-                '--no-resolve', '--icp', str(manual), '--scores', str(scores), '--getleads']
+                '--no-resolve', '--icp', str(manual), '--scores', str(scores), '--getleads', '--find-emails']
         with patch.object(pipeline, 'run_step', side_effect=execute), patch.object(getleads, 'allowance', return_value=(10, 'credits')), \
                 patch.object(getleads, 'enrich_batch', return_value={self.person()['linkedinUrl']: ('matched', self.normalized())}) as req:
             with patch('sys.argv', args), self.assertRaisesRegex(SystemExit, 'need judgments'):
@@ -267,6 +271,11 @@ class GetLeadsTests(unittest.TestCase):
                 pipeline.main()
         self.assertEqual(req.call_count, 1)
         self.assertEqual(common.read_csv(base / 'ranked_engagers.csv')[0][0]['ledger_status'], 'eligible')
+        emailed = common.read_csv(base / 'enriched.csv')[0][0]
+        self.assertEqual((emailed['email_status'], emailed['sendable'], emailed['email_provider']),
+                         ('UNVERIFIED', 'false', 'getleads'))
+        self.assertTrue(emailed['qualification_reason'])
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM enrichment_attempts').fetchone()[0], 1)
 
 
 if __name__ == '__main__':

@@ -20,7 +20,7 @@ class DecisionReasonTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.enterContext(patch.dict(os.environ, {'LEDGER_DB': str(self.root / 'ledger.sqlite'),
                                                  'LLM_PROVIDER': 'openai', 'OPENAI_API_KEY': 'offline-dummy',
-                                                 'PROSPEO_API_KEY': 'offline-dummy', 'CLAUDECODE': ''}))
+                                                 'GETLEADS_API_KEY': 'offline-dummy', 'CLAUDECODE': ''}))
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
         self.con = ledger.connect()
@@ -194,11 +194,13 @@ class DecisionReasonTests(unittest.TestCase):
                 patch.object(activity.subprocess, 'run', side_effect=fake):
             activity.main()
         enriched = base / 'enriched.csv'
-        unavailable = {'email': '', 'email_status': 'UNAVAILABLE', 'sendable': 'false', 'email_provider': 'prospeo',
-                       'email_checked_at': ledger.now(), 'miss_reason': 'no_verified_email'}
+        self.con.execute('INSERT INTO provider_enrichments VALUES (?,?,?,?,?)',
+                         ('getleads', self.person()['linkedinUrl'], 'not_found', '{}', ledger.now()))
+        self.con.commit()
         with patch('sys.argv', ['email_enrich.py', '--input', str(output), '--output', str(enriched)]), \
-                patch.object(email_enrich, 'enrich_person', return_value=unavailable):
+                patch.object(email_enrich.getleads, 'request') as request:
             email_enrich.main()
+        request.assert_not_called()
         row = common.read_csv(enriched)[0][0]
         self.assertEqual(row['qualification_reason'], self.result()['qualification_reason'])
         self.assertEqual(row['intent_reason'], self.result()['intent_reason'])
@@ -245,6 +247,8 @@ class DecisionReasonTests(unittest.TestCase):
                 self.assertEqual(r['activity_model'], '')
             if r['outreach_ready_probability']:
                 self.assertEqual(r['activity_model'], 'jev-latest')
+            if r['email']:
+                self.assertEqual((r['email_provider'], r['email_status'], r['sendable']), ('getleads', 'UNVERIFIED', 'false'))
         self.assertIn('comment_post_url', fields)
 
 

@@ -16,7 +16,7 @@ Read these columns together:
 
 Jane is a strong fit with a specific need and recent activity. Morgan meets the ICP threshold but has weak recent activity evidence. Sam has a relevant problem but fails this ICP because they sell consulting services. Riley lacks employer evidence. Nina is outside the target countries. Taylor has no usable public profile URL; Quinn's activity judgment failed. Neither an unchecked profile nor a failed check establishes inactivity.
 
-The sample illustrates `--activity` and `--find-emails` output together. Actual runs write reasons for every scored person, including rejected people. Activity is checked only for eligible people above the fit threshold with a usable public URL. Activity readiness is advisory and does not automatically block imports. The original `outreach_reason` column remains as an alias of `activity_reason`.
+The sample illustrates `--activity` and GetLeads `--find-emails` output together. Discovered work emails are UNVERIFIED and sendable=false; a separate verification step is required before email imports. Actual runs write reasons for every scored person, including rejected people. Activity is checked only for eligible people above the fit threshold with a usable public URL. Activity readiness is advisory and does not automatically block imports. The original `outreach_reason` column remains as an alias of `activity_reason`.
 
 The sample shows selected human-facing columns. Real exports also include internal identity and ledger provenance fields.
 

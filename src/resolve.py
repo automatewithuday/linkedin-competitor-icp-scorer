@@ -32,7 +32,7 @@ except ImportError:
 ACTOR = 'harvestapi/linkedin-profile-scraper'
 MODE = 'Profile details no email ($4 per 1k)'
 PROFILE_USD = 0.004
-MISS_DAYS = 30  # same horizon as the Prospeo cache: profiles change, a miss is not permanent
+MISS_DAYS = 30  # profiles change; a miss is not permanent
 FAILED_EXIT = 3
 
 

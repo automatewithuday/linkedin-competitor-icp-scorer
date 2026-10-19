@@ -19,7 +19,7 @@ The allowlisted `data` fields are normalized into `engagers.json` → `icp_enric
 | `person_location` | `current_location` |
 | `person_country` | `contact_country`, `location_country` |
 
-`source:getleads` and the local `checked_at` timestamp accompany the evidence. Email/phone fields and unknown fields are discarded. Company HQ fields never fill person geography. The scorer sees this data separately from the harvested fields and must explain conflicts or absent evidence. CSV uses `getleads_` prefixes for these fields, plus `getleads_status` and `getleads_checked_at`.
+`source:getleads` and the local `checked_at` timestamp accompany the evidence. Work email is retained only in the shared provider cache, alongside an internal email_lookup_complete marker; neither is passed into scoring evidence or its hash. Phone fields and unknown fields are discarded. Company HQ fields never fill person geography. The scorer sees this data separately from the harvested fields and must explain conflicts or absent evidence. CSV uses `getleads_` prefixes for these fields, plus `getleads_status` and `getleads_checked_at`.
 
 SQLite automatically adds `provider_enrichments` (URL cache), `enrichment_attempts` (durable submission cap/history), and `profile_snapshots.enrichment_json`. Enrichment evidence participates in evidence hashes and score contexts; the local lookup timestamp alone does not invalidate a score. Old snapshots, purchased lookups and campaign history are preserved. See [operations](OPERATIONS.md#optional-getleads-icp-evidence) for limits, caching and recovery.
 

@@ -50,11 +50,11 @@ def main() -> None:
     ap.add_argument("--max-reactions", type=int, default=100)
     ap.add_argument("--max-comments", type=int, default=50)
     ap.add_argument("--posted-limit", choices=["24h", "week", "month"], default="month")
-    ap.add_argument("--find-emails", action="store_true", help="Enrich qualified leads with Prospeo")
+    ap.add_argument("--find-emails", action="store_true", help="Find qualified leads' work emails with GetLeads (unverified)")
     ap.add_argument("--min-fit", type=int, choices=range(1, 6), default=4)
     ap.add_argument('--getleads', action='store_true', help='Fill missing ICP evidence for borderline-and-up candidates with GetLeads plan credits')
-    ap.add_argument('--getleads-max-lookups', type=int, default=100, help='GetLeads submission cap per slug, including retries (default 100)')
-    ap.add_argument("--max-lookups", type=int, default=100)
+    ap.add_argument('--max-lookups', '--getleads-max-lookups', type=int, default=100,
+                    help='Shared GetLeads submission cap per slug for ICP and emails, including retries (default 100)')
     ap.add_argument("--draft", action="store_true",
                     help="Draft connection note + DM per qualified row using playbooks/copy-templates.md")
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
@@ -82,7 +82,7 @@ def main() -> None:
         ap.error("one of --profile, --post or --skip-harvest is required")
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.slug):
         ap.error("Slug must contain only letters, digits, underscores and hyphens")
-    if min(args.max_posts, args.max_reactions, args.max_comments) < 0 or min(args.max_lookups, args.getleads_max_lookups) < 1:
+    if min(args.max_posts, args.max_reactions, args.max_comments) < 0 or args.max_lookups < 1:
         ap.error("Invalid scrape or lookup limits")
     if args.campaign_id is not None and (args.campaign_id < 1 or not args.find_emails):
         ap.error("--campaign-id must be positive and requires --find-emails")
@@ -94,9 +94,7 @@ def main() -> None:
                  'or install the `claude` CLI and log in to your Claude subscription (LLM_PROVIDER=claude).')
     if not (args.skip_harvest and args.no_resolve) and not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
         required.append('APIFY_TOKEN')
-    if args.find_emails:
-        required.append('PROSPEO_API_KEY')
-    if args.getleads:
+    if args.getleads or args.find_emails:
         required.append('GETLEADS_API_KEY')
     if args.supabase:
         required.append('SUPABASE_URL')
@@ -182,7 +180,7 @@ def main() -> None:
                  "--min-fit", str(max(1, args.min_fit - 1))] + batch + (["--scores", args.scores] if args.scores else []))
     if args.getleads:
         run_step('GetLeads ICP evidence', [py, 'src/getleads.py', '--slug', slug, '--output-dir', out,
-                 '--min-fit', str(max(1, args.min_fit - 1)), '--max-lookups', str(args.getleads_max_lookups)])
+                 '--min-fit', str(max(1, args.min_fit - 1)), '--max-lookups', str(args.max_lookups)])
     if not args.no_resolve or args.getleads:
         with ledger.connect() as con:
             pending = ledger.pending_scores(con, Path(out) / slug)
@@ -209,8 +207,8 @@ def main() -> None:
         final_csv = activity_csv
     if args.find_emails:
         enriched = out_csv.with_name("enriched.csv")
-        run_step("Prospeo verified emails", [py, "src/email_enrich.py", "--input", str(final_csv),
-                 "--output", str(enriched), "--min-fit", str(args.min_fit), "--max-lookups", str(args.max_lookups)])
+        run_step("GetLeads work emails (unverified)", [py, "src/email_enrich.py", "--input", str(final_csv),
+                 "--output", str(enriched), "--slug", slug, "--min-fit", str(args.min_fit), "--max-lookups", str(args.max_lookups)])
         final_csv = enriched
     if args.supabase:
         run_step("Supabase snapshots", [py, "src/supabase_export.py", "--input", str(final_csv), "--run-id", slug])

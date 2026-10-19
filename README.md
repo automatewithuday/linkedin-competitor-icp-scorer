@@ -78,7 +78,7 @@ Fit is an estimate based on available evidence. Review shortlisted people before
 
 Already use GetLeads? Add `--getleads` to fill missing buyer/company evidence for plausible candidates before final scoring. Apify still collects the engagers. GetLeads uses your plan credits or fair-use allowance; the $0.012 engager-scraping charge does not apply to these lookups. Set `GETLEADS_API_KEY` locally; [preview lookups and usage](docs/OPERATIONS.md#optional-getleads-icp-evidence) first. Results are cached across runs.
 
-Ask Claude to add an activity check (`--activity`, requires `TYPESAFE_API_KEY`), draft connection notes and DMs, find verified work emails, or preview an import into HeyReach or Smartlead. These integrations may need additional API keys and credits. Campaign imports require a separate `--execute` command.
+Ask Claude to add an activity check (`--activity`, requires `TYPESAFE_API_KEY`), draft connection notes and DMs, find work emails through GetLeads (unverified), or preview an import into HeyReach or Smartlead. These integrations may need additional API keys and credits. Campaign imports require a separate `--execute` command.
 
 For repeat runs, the local database remembers people, reuses completed lookups and unchanged scores, and checks recorded campaign history and your do-not-contact list.
 

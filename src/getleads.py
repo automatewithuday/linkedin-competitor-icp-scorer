@@ -1,6 +1,6 @@
 """Selective ICP evidence enrichment. Apify collects engagement; GetLeads fills buyer-data gaps.
 
-Uses plan credits, NOT the $0.012/engager scraping product. No email discovery or verification.
+Uses plan credits, NOT the $0.012/engager scraping product. Optional email discovery shares this cache.
 Public LinkedIn URLs only; no name matching. Results and submission attempts are shared in SQLite.
 """
 import argparse
@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 
 try:
     from . import ledger
-    from .common import fit, linkedin_url, read_csv, write_json
+    from .common import fit, linkedin_url, read_csv, valid_email, write_json
 except ImportError:
     import ledger
-    from common import fit, linkedin_url, read_csv, write_json
+    from common import fit, linkedin_url, read_csv, valid_email, write_json
 
 BASE_URL = 'https://app.getleads.io/api/v1'
 BATCH_SIZE = 25
@@ -80,8 +80,8 @@ def text_field(data, *keys):
 
 
 def normalize(data):
-    """Allowlist only ICP evidence. Deliberately discard email, phone and unrelated personal data."""
-    return dict(zip(FIELDS, (
+    """Allowlist ICP facts and work email; email is never scoring evidence or verified here."""
+    facts = dict(zip(FIELDS, (
         text_field(data, 'current_title'),
         text_field(data, 'current_company_name', 'co_name'),
         text_field(data, 'current_company_website', 'org_domain', 'co_website'),
@@ -91,6 +91,8 @@ def normalize(data):
         text_field(data, 'current_location'),
         text_field(data, 'contact_country', 'location_country'),
     )))
+    email = text_field(data, 'work_email')
+    return facts | {'work_email': email if valid_email(email) else '', 'email_lookup_complete': True}
 
 
 def enrich_batch(urls, key):
@@ -142,20 +144,23 @@ def cached(con, url):
     return dict(row) if row else None
 
 
-def fresh(hit, days):
+def fresh(hit, days, require_email=False):
     if not hit or hit['status'] not in ('matched', 'not_found'):
         return False
+    if require_email and hit['status'] == 'matched' and not json.loads(hit['data']).get('email_lookup_complete'):
+        return False  # older caches discarded email fields; they cannot certify that no email was found
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(hit['checked_at'])).total_seconds()
     return 0 <= age < days * 86400
 
 
 def apply(e, data, checked_at):
     # Keep Apify evidence intact. Conflicting employers stay visible as separately sourced evidence.
-    if any(data.values()):
-        e['icp_enrichment'] = {**data, 'source': PROVIDER, 'checked_at': checked_at}
+    facts = {k: data.get(k) or '' for k in FIELDS}
+    if any(facts.values()):
+        e['icp_enrichment'] = {**facts, 'source': PROVIDER, 'checked_at': checked_at}
 
 
-def reserve(con, urls, slug, max_lookups, cache_days, retry_unknown):
+def reserve(con, urls, slug, max_lookups, cache_days, retry_unknown, require_email=False):
     """Atomically claim submissions so concurrent runs cannot both pay for the same URL."""
     attempts, reused, held = {}, {}, []
     with con:
@@ -164,7 +169,7 @@ def reserve(con, urls, slug, max_lookups, cache_days, retry_unknown):
                            (PROVIDER, slug)).fetchone()[0]
         for url in urls:
             hit = cached(con, url)
-            if fresh(hit, cache_days):
+            if fresh(hit, cache_days, require_email):
                 reused[url] = hit
                 continue
             if hit and hit['status'] in ('pending', 'unknown') and not retry_unknown:
@@ -181,6 +186,28 @@ def reserve(con, urls, slug, max_lookups, cache_days, retry_unknown):
                         (PROVIDER, url, 'pending', '{}', stamp))
             used += 1
     return attempts, reused, held
+
+
+def fetch_reserved(con, attempts, key):
+    """Complete a previously committed claim; used by both ICP enrichment and email discovery."""
+    stamp = ledger.now()
+    try:
+        results = enrich_batch(list(attempts), key)
+    except ProviderError as exc:
+        status = 'unknown' if exc.unknown else 'error'
+        for url, attempt_id in attempts.items():
+            con.execute('UPDATE enrichment_attempts SET status=? WHERE id=?', (status, attempt_id))
+            con.execute('UPDATE provider_enrichments SET status=? WHERE provider=? AND identity=?', (status, PROVIDER, url))
+        con.commit()
+        return {}, exc
+    hits = {}
+    for url, (status, data) in results.items():
+        con.execute('INSERT OR REPLACE INTO provider_enrichments VALUES (?,?,?,?,?)',
+                    (PROVIDER, url, status, json.dumps(data), stamp))
+        con.execute('UPDATE enrichment_attempts SET status=? WHERE id=?', (status, attempts[url]))
+        hits[url] = cached(con, url)
+    con.commit()
+    return hits, None
 
 
 def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=CACHE_DAYS, retry_unknown=False):
@@ -260,7 +287,6 @@ def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=C
             raise ProviderError('Insufficient GetLeads allowance for the planned batch; lower --max-lookups or wait for reset.')
         for start in range(0, len(urls), BATCH_SIZE):
             chunk = urls[start:start + BATCH_SIZE]
-            stamp = ledger.now()
             # Commit BEFORE submitting. Process interruption cannot silently repeat a charged batch.
             attempt_ids, reused, concurrent = reserve(con, chunk, base.name, max_lookups, cache_days, retry_unknown)
             held.extend(concurrent)
@@ -277,32 +303,24 @@ def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=C
             chunk = list(attempt_ids)
             if not chunk:
                 continue
-            try:
-                results = enrich_batch(chunk, key)
-            except ProviderError as exc:
+            hits, exc = fetch_reserved(con, attempt_ids, key)
+            if exc:
                 status = 'unknown' if exc.unknown else 'error'
                 for url in chunk:
-                    con.execute('UPDATE enrichment_attempts SET status=? WHERE id=?', (status, attempt_ids[url]))
-                    con.execute('UPDATE provider_enrichments SET status=? WHERE provider=? AND identity=?',
-                                (status, PROVIDER, url))
                     for i in todo[url]:
                         engagers[i]['getleads_status'] = status
-                con.commit()
                 checkpoint()
                 print(str(exc))
                 return changed, True
-            for url, (status, data) in results.items():
-                con.execute('INSERT OR REPLACE INTO provider_enrichments VALUES (?,?,?,?,?)',
-                            (PROVIDER, url, status, json.dumps(data), stamp))
-                con.execute('UPDATE enrichment_attempts SET status=? WHERE id=?', (status, attempt_ids[url]))
+            for url, hit in hits.items():
                 for i in todo[url]:
-                    engagers[i]['getleads_status'] = status
-                    engagers[i]['getleads_checked_at'] = stamp
-                if status == 'matched':
+                    engagers[i]['getleads_status'] = hit['status']
+                    engagers[i]['getleads_checked_at'] = hit['checked_at']
+                if hit['status'] == 'matched':
                     for i in todo[url]:
-                        apply(engagers[i], data, stamp)
+                        apply(engagers[i], json.loads(hit['data']), hit['checked_at'])
             checkpoint()
-            print(f'GetLeads batch: {len(chunk)} submitted; {sum(s == "matched" for s, _ in results.values())} matched.')
+            print(f'GetLeads batch: {len(chunk)} submitted; {sum(h["status"] == "matched" for h in hits.values())} matched.')
         return changed, bool(held)
 
 

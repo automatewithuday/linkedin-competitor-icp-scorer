@@ -16,7 +16,7 @@ uv run setup_icp.py
 
 Without uv: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.lock.txt` (exported from `uv.lock`), then replace `uv run` with `python` below. In Claude Code, `/setup` and `/first-run` cover this.
 
-Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify for harvesting and one LLM for ranking (an OpenAI key, or your Claude subscription via the `claude` CLI; see below), Prospeo for email enrichment, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation and for the website step in `setup_icp.py`; without a key a plain page fetch is used, which is fine for most marketing sites but misses JavaScript-rendered content. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
+Fill in `.env` locally. Do not paste keys into chat or commit them. You need Apify for harvesting and one LLM for ranking (an OpenAI key, or your Claude subscription via the `claude` CLI; see below), GetLeads for optional ICP enrichment and work-email discovery, and Smartlead only for actual imports. Firecrawl is optional for `--domain` automatic ICP derivation and for the website step in `setup_icp.py`; without a key a plain page fetch is used, which is fine for most marketing sites but misses JavaScript-rendered content. Edit `icp.example.yaml` or use the intake to define your own buyers; the example is not a recommended ICP for your business.
 
 ## Scoring LLM
 
@@ -72,14 +72,22 @@ Outputs in `output/competitor-2026-09-16/`:
 - `ranked_engagers.csv`: everyone, including low-fit leads, qualified first, with source profile and post references.
 - `resolve_runs.json`: every profile-lookup actor run (run id, ids sent, complete or error), for reconciling Apify charges.
 - `activity.csv` and `activity/`: with `--activity`, LinkedIn activity verdicts plus the full per-profile output and raw cache.
-- `enriched.csv`: all rows with email verification fields and a `miss_reason` for every skipped/unresolved row.
-- `enriched.prospeo-cache.json`: checkpointed enrichment results, reusable for 30 days.
+- `enriched.csv`: all rows with optional discovered work emails, explicit UNVERIFIED status and sendable=false; miss_reason explains skips, misses or the need for verification.
+- `data/ledger.sqlite`: shared GetLeads profile/email cache and durable submission history; successful and missed lookups are reusable for 30 days. Legacy provider cache files are preserved but not read.
 
-`--find-emails` is optional. Default harvesting caps posts at 10, reactions at 100/post and comments at 50/post, over the last month. Use `--posted-limit week` or `24h`. `--max-posts 0` removes the post cap and may increase spend. Lookups are capped at 100 and fit >=4 by default. Cached lookups do not consume that cap. Caps limit requests, not currency; check your provider plans.
+`--find-emails` is optional. Default harvesting caps posts at 10, reactions at 100/post and comments at 50/post, over the last month. Use `--posted-limit week` or `24h`. `--max-posts 0` removes the post cap and may increase spend. Email discovery requires fit >=4 by default. --max-lookups caps total GetLeads submissions per slug (100 by default), shared with optional ICP enrichment and including retries. Cached results do not add submissions. Caps limit requests, not currency; check your provider plans.
 
 The rank score combines ICP fit, number of distinct posts engaged with, and comment intent. Reactions alone remain low intent. Engagement is a prioritization signal, not proof of purchase intent. Headline-only scoring cannot establish missing company size, geography, or industry. Review the ranked output before outreach. ICP exclusions and triggers are included in the prompt; this is not a substitute for a CRM suppression list.
 
-Prospeo matches a public LinkedIn URL first, or a full name plus known `domain`/`company_website`. It never enriches from `company_guess` alone. Only revealed, syntactically valid addresses with `VERIFIED` status become sendable. Errors fail the command after saving the CSV; rerun the enrichment step to reuse successful checkpoints. A `NO_MATCH` is a normal miss, not a pipeline error.
+GetLeads email discovery matches a public LinkedIn URL only, for qualified, eligible rows. It reuses the ICP-enrichment response when available, avoiding a second paid lookup. Found work emails are UNVERIFIED with sendable=false and miss_reason=verification_required because the enrichment endpoint returns no verification metadata. No-match/no-email results are normal cached misses. Pending or unknown submissions stop the stage until provider review; successful batches survive later failures. Old caches that discarded email fields require one new lookup if email discovery is requested. No email verifier is bundled.
+
+Preview optional email discovery without spending credits:
+
+```bash
+uv run src/email_enrich.py --input output/RUN_NAME/ranked_engagers.csv --output output/RUN_NAME/enriched.csv --dry-run
+```
+
+Run the same command without `--dry-run` to discover addresses. Use `--slug` only when the input folder does not match the pipeline run name. `--max-lookups` is the shared per-slug cap, and `--retry-unknown` is an explicit retry after provider review. Finding an email does not mark it verified or sendable.
 
 ## Smartlead
 
@@ -101,7 +109,7 @@ Importing into an active campaign can start sending. This code does not create s
 
 Imports use batches of at most 400 and save confirmed added/skipped counts, IDs and skip details. A timeout, malformed response or inconsistent counts stop the import with an unconfirmed receipt. Reconcile that batch in Smartlead before retrying; writes are not automatically replayed and exactly-once delivery is not guaranteed. A receipt covers one invocation; copy it before retrying if you need to retain all attempts. Local suppression is supported through the CSV column; inbound reply/unsubscribe webhooks are not implemented.
 
-You can pass `--campaign-id 123` to `run.py` with `--find-emails` to generate the preview at the end. The orchestrator never executes the campaign import.
+You can pass `--campaign-id 123` to `run.py` with `--find-emails` to generate the preview at the end. Newly discovered GetLeads emails are excluded until separately verified; expect zero eligible emails from discovery alone. To import later, use a separately verified CSV with email_status=VERIFIED, sendable=true and the actual verification time in email_checked_at. Preserve qualification reasons and ledger provenance columns. The orchestrator never executes the campaign import.
 
 ## HeyReach (LinkedIn outreach)
 
@@ -145,7 +153,7 @@ uv run src/email_enrich.py --input output/competitor-2026-09-16/ranked_engagers.
 
 Re-running `run.py` starts another paid harvest. Reuse individual stages when recovering. Do not run concurrent jobs against the same slug/output files. No recurring schedule is installed by this project.
 
-The optional upstream `--enrich` company-scraping stage is retained, but its company output is not yet joined into ranking; it is not needed for Prospeo email enrichment.
+The optional upstream `--enrich` company-scraping stage is retained, but its company output is not yet joined into ranking; it is not needed for GetLeads email discovery.
 
 ## Validation
 
@@ -155,7 +163,7 @@ uv run python -m unittest discover -s tests -v
 
 Tests use mocked provider responses and do not spend API credits or send emails. Live setup requires your keys, ICP, target profiles and campaign ID.
 
-API references: [Prospeo Enrich Person](https://prospeo.io/api-docs/enrich-person), [Smartlead import](https://api.smartlead.ai/api-reference/campaigns/add-leads), [Supabase API security](https://supabase.com/docs/guides/api/securing-your-api). The original generated PDF setup guide was removed because it described the previous provider stack; this README is the current guide.
+API references: [GetLeads enrichment](https://www.getleads.io/docs/#2-from-linkedin-profile-url), [Smartlead import](https://api.smartlead.ai/api-reference/campaigns/add-leads), [Supabase API security](https://supabase.com/docs/guides/api/securing-your-api). The original generated PDF setup guide was removed because it described the previous provider stack; this README is the current guide.
 
 ## Single-post harvest
 
@@ -197,7 +205,7 @@ The full ~40-column result, a JSONL copy and the raw actor output land in `outpu
 
 ## Opaque profile IDs
 
-Reaction items, and every engager from a `--profile` harvest, often carry only LinkedIn's opaque profile ID (`/in/ACoAA...`) instead of a public URL. That hides location and employer from the scorer, and Prospeo, the activity check and Smartlead cannot use the row. Two mechanisms close the gap:
+Reaction items, and every engager from a `--profile` harvest, often carry only LinkedIn's opaque profile ID (`/in/ACoAA...`) instead of a public URL. That hides location and employer from the scorer, and GetLeads, the activity check and Smartlead cannot use the row. Two mechanisms close the gap:
 
 - `--post` harvests ask the post actors for `profileScraperMode: "main"`, so nearly every engager arrives with a vanity URL, `location` and current `company` (+$0.002 per engager on top of $0.002 per reaction/comment; the spend cap includes it). `--profile` harvests cannot do this: that actor has no profile mode.
 - **Profile lookups before final scoring** (default): after the first scoring pass, `run.py` runs `src/resolve.py --slug <slug>` over opaque engagers at `icp_fit >= --min-fit - 1` (3 by default): `harvestapi/linkedin-profile-scraper`, $0.004 per profile, hard cap = estimate x 1.25 + $0.05 per run. Results go into `engagers.json` (public URL, `location`, `company`, `resolve_status`). Automatic scorers then rescore on their own. With `--scores` the run stops, lists the indices that gained profile data (also in `rescore.json`), and continues only once `scores.json` has been updated. On a real 151-engager run this cost $0.12 and moved 10 of 53 candidates (4 up, 6 down on geography).
@@ -241,7 +249,7 @@ The ledger persists both explanations and includes them in score provenance. Exi
 - **Fresh or stale.** A score is fresh only while the person's evidence (headline, location, employer, comments), the ICP version and the scoring rubric (`rank.SYSTEM`) all match. Location changes, so the score is stale, so the person waits for rescoring, and the new qualification decides export eligibility.
 - **Rescore only when necessary.** `rank.py --dump` lists only people without a fresh score; `rank.py` fills the rest from the ledger, so `scores.json` may contain just the new rows. Automatic scorers skip them too.
 - **Pay once.** Profile lookups made in any run are reused by every later run, and still go back through scoring as new evidence.
-- **Gate before anything costs or sends.** After final scoring, `run.py` stamps `ledger_status` on every row: `eligible`, `stale_score`, `suppressed:<reason>` or `in_campaign:<campaign>`. Activity, drafts, Prospeo, Smartlead and HeyReach only take `eligible` rows. The push stages also check email and domain suppressions.
+- **Gate before anything costs or sends.** After final scoring, `run.py` stamps `ledger_status` on every row: `eligible`, `stale_score`, `suppressed:<reason>` or `in_campaign:<campaign>`. Activity, drafts, GetLeads email discovery, Smartlead and HeyReach only take `eligible` rows. The push stages also check email and domain suppressions.
 - **No repeat outreach.** Every all-success batch of a `--execute` push is recorded as `imported`; that person is then out of every later push, in any campaign. Opaque `/in/ACoAA...` URLs share the same identity history as public URLs. A HeyReach batch with only failures is `failed` and can retry. Mixed success/failure counts, or Smartlead skipped counts without confirmed individual identities, become `needs_reconciliation` and block automatic retries until checked in the provider. Unconfirmed batches remain `unconfirmed` and retain their existing retry policy: reconcile them in the provider first.
 
 **Scoring provenance and upgrades.** Copy `score_context` from each row of `rank.py --dump` into its judgment in `scores.json`. This fingerprint binds the result to that person's identity, headline, location, employer, comments, optional GetLeads evidence, ICP and rubric. Missing or outdated contexts are rejected before any supplied score is stored. After a partial lookup failure, dump and judge changed rows before retrying. Updating a file timestamp never makes a score fresh. Scoring-rubric changes require new judgments; purchased lookup results remain reusable. SQLite upgrades automatically add enrichment caches, submission history and a snapshot evidence column without removing prior scores or campaign records.
@@ -288,9 +296,9 @@ uv run run.py --slug RUN_NAME --skip-harvest --icp icp.yaml --getleads --getlead
 
 - **Selection:** first-pass fit at least `--min-fit - 1` (default 3), a public LinkedIn URL, no recorded suppression/campaign block, and missing role/employer evidence or a missing location, industry or size criterion required by the ICP. Clear rejects and hidden IDs are skipped. The existing Apify resolver runs first unless `--no-resolve` is set. Fresh partial matches and misses are reused rather than billed again for the same gaps.
 - **API:** batches of up to 25 known URLs go to `POST /api/v1/enrich/from-linkedin`, with strict returned-URL checks. No name search, database-wide search or wallet-funded post scrape. Each submitted URL costs one plan credit even on a miss; unlimited accounts use fair-use rows. The free `GET /api/v1/usage/fair-use` check runs before submission and stops the stage if the planned allowance is unavailable. No automatic top-ups. Dry-run makes no API calls; its estimate is a credit count, not a dollar quote.
-- **Cap and cache:** default 100 submitted identities per slug, including failed/unknown attempts and retries. `--getleads-max-lookups` changes that total cap; a plain rerun never resets it. Matched and not-found responses are cached in SQLite for 30 days across runs. The standalone command accepts `--cache-days` to change the freshness window. Cached evidence remains visible with its original lookup date while awaiting a refresh; a lookup date is not a live verification date.
+- **Cap and cache:** default 100 submitted identities per slug across ICP enrichment and email discovery, including failed/unknown attempts and retries. `--max-lookups` (alias `--getleads-max-lookups`) changes that shared total cap; a plain rerun never resets it. Matched and not-found responses are cached in SQLite for 30 days across runs. The standalone command accepts `--cache-days` to change the freshness window. Cached evidence remains visible with its original lookup date while awaiting a refresh; a lookup date is not a live verification date.
 - **Failure recovery:** each batch is claimed in SQLite before submission, preventing another run from repeating the same pending lookup. Completed batches survive later failures. A network timeout, interrupted request, malformed result or ambiguous identity stops exports and holds the request as pending/unknown. Check GetLeads before explicitly retrying with `uv run src/getleads.py --slug RUN_NAME --retry-unknown --max-lookups 100`; a retry may cost again and still counts against the slug cap. Authentication, credit and rate-limit errors stop the stage; fix the cause and rerun. Reaching the configured cap leaves remaining rows marked `lookup_limit_reached`; missing evidence stays unknown.
 - **Final scoring:** GetLeads role, employer, person location, industry, size band, domain and company description appear in `rank.py --dump` and the scorer prompt. Company HQ is never substituted for person location. Conflicting employers remain separately sourced; size bands are not exact headcounts. New evidence invalidates prior scores and delayed export proofs. In-session runs stop for new judgments: dump, judge the changed indices, copy their new contexts, and resume. Automatic scoring rescores changed evidence. Neither an enrichment miss nor an API error means the person fails the ICP.
 - **Output:** `ranked_engagers.csv` adds `getleads_status`, lookup date and separate `getleads_*` evidence columns, alongside the existing qualification/rejection explanations. The summary reports lookup statuses. Apify employer/location remain preferred in the main columns; GetLeads can fill blanks, with `company_source`/`location_source` identifying it. See the [fictional enrichment example](../examples/getleads-enrichment.sample.csv).
 
-This integration discards returned email and phone fields. Optional verified email discovery still uses Prospeo; Activity Intel still uses Apify + Jev via TypeSafe. GetLeads enrichment supplies neither email-verification metadata nor the recent-activity judgment needed to replace those stages. Runs without `--getleads` make no GetLeads requests, and each repository user supplies their own keys.
+Optional `--find-emails` uses the same GetLeads responses and cache; found addresses are UNVERIFIED with sendable=false. Phones are discarded, and emails never enter ICP scoring evidence. Activity Intel still uses Apify + Jev via TypeSafe. Runs without either `--getleads` or `--find-emails` make no GetLeads requests. Each repository user supplies their own keys.
