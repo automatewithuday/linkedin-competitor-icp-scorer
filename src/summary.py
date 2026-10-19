@@ -15,6 +15,15 @@ def summarize(rows, top=20, min_fit=4):
     if not rows:
         return lines
     cols = set(rows[0])
+    if str(rows[0].get('schema_version',''))=='2':
+        counts=Counter(r.get('qualification_status') or 'needs_review' for r in rows)
+        lines.append('ICP decisions: '+str(dict(counts)))
+        lines.append(f"Eligible: {sum(r.get('eligibility_status')=='eligible' for r in rows)}")
+        for row in rows[:top]:
+            lines.append(f"{row.get('name')}: {row.get('qualification_status')} — {row.get('qualification_reason')}")
+            lines.append(f"  Company: {row.get('company_decision')} — {row.get('company_reason')}")
+            lines.append(f"  Person: {row.get('person_decision')} — {row.get('person_reason')}")
+        return lines
     if 'icp_fit' in cols:
         dist = Counter(fit(r) for r in rows)
         lines.append("ICP fit: " + ", ".join(f"{k}={dist[k]}" for k in sorted(dist, reverse=True)))

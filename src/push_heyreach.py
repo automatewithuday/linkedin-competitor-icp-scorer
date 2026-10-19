@@ -13,10 +13,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
+    from .common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
     from . import ledger
 except ImportError:
-    from common import qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
+    from common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
     import ledger
 
 BASE = 'https://api.heyreach.io/api/public'
@@ -30,6 +30,7 @@ def load_drafts(input_path):
     if not p.exists():
         return {}
     rows, _ = read_csv(p)
+    reject_core_exports(rows)
     return {r.get('linkedin_url', ''): r for r in rows}
 
 
@@ -108,6 +109,7 @@ def main():
     if min(target.values()) <= 0:
         ap.error('IDs must be positive')
     rows, _ = read_csv(args.input)
+    reject_core_exports(rows)
     con = ledger.connect()
     rows, dropped = ledger.filter_export_rows(con, rows, Path(args.input).parent)
     leads, excluded = select_leads(rows, args.min_fit, load_drafts(args.input))

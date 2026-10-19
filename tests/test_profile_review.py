@@ -47,7 +47,7 @@ class ProfileReviewTests(unittest.TestCase):
         return base
 
     def rank(self, base, result=None, threshold=4):
-        args = ['rank.py', '--slug', base.name, '--output-dir', str(self.root), '--min-fit', str(threshold)]
+        args = ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--min-fit', str(threshold)]
         if result is not None:
             es=json.loads((base/'engagers.json').read_text()); icp=json.loads((base/'recipient_icp.json').read_text())
             common.write_json(base/'scores.json', {'results': [{**result, 'score_context': ledger.score_context(es[0], icp, rank.SYSTEM)}]})

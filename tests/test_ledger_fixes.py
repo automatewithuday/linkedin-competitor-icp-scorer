@@ -49,7 +49,7 @@ class LedgerFixTests(unittest.TestCase):
         return path
 
     def rank(self, base, scores=None, dump=False):
-        args = ['rank.py', '--slug', base.name, '--output-dir', str(self.root)]
+        args = ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root)]
         args += ['--dump'] if dump else ['--scores', str(scores)]
         out = io.StringIO()
         with patch('sys.argv', args), contextlib.redirect_stdout(out):
@@ -76,7 +76,7 @@ class LedgerFixTests(unittest.TestCase):
         def execute(label, cmd):
             with patch('sys.argv', cmd[1:]):
                 modules[cmd[1]].main()
-        args = ['run.py', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
+        args = ['run.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
                 '--icp', str(yaml), '--scores', str(scores), '--resolve-batch', '1']
         def invoke():
             with patch('sys.argv', args):

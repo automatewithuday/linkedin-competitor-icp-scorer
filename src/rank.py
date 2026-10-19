@@ -246,7 +246,7 @@ def clamp_fit(v) -> int:
     return max(1, min(5, n))
 
 
-def main() -> None:
+def legacy_main() -> None:
     ap = argparse.ArgumentParser(description="Score and rank engagers against recipient ICP")
     ap.add_argument("--slug", required=True, help="Slug matching harvest/icp output")
     ap.add_argument("--output-dir", default="./output", help="Base output directory")
@@ -421,6 +421,24 @@ def main() -> None:
     for r in rows[:10]:
         print(f"  {r['rank']:>2}  {r['icp_fit']:>3}  {r['intent']:<6}  "
               f"{r['rank_score']:>7.2f}  {r['name'][:26]:<26}  {r['clean_title'][:50]}")
+
+
+def main():
+    args=sys.argv[1:]
+    if '--legacy' in args:
+        original=sys.argv;sys.argv=[x for x in original if x!='--legacy']
+        try:return legacy_main()
+        finally:sys.argv=original
+    if '--icp' not in args and '--slug' in args:
+        slug=args[args.index('--slug')+1]
+        output=args[args.index('--output-dir')+1] if '--output-dir' in args else './output'
+        manifest=Path(output)/slug/'core-run.json'
+        if manifest.exists():args+=['--icp',json.loads(manifest.read_text())['icp_path']]
+    if '--icp' not in args:
+        raise SystemExit('Company-first ranking requires --icp profiles/<name>/client-profile.yaml. --legacy is for archived runs only.')
+    sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
+    from src.qualify import main as qualify_main
+    return qualify_main(args)
 
 
 if __name__ == "__main__":

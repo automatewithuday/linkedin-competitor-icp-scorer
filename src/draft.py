@@ -14,9 +14,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import qualification_ok, ledger_ok, read_csv, write_csv, llm_json
+    from .common import reject_core_exports, qualification_ok, ledger_ok, read_csv, write_csv, llm_json
 except ImportError:
-    from common import qualification_ok, ledger_ok, read_csv, write_csv, llm_json
+    from common import reject_core_exports, qualification_ok, ledger_ok, read_csv, write_csv, llm_json
 
 load_dotenv()
 
@@ -103,6 +103,7 @@ def main() -> None:
         if not (base / f).exists():
             sys.exit(f"Missing: {base / f} (run rank.py first)")
     rows, _ = read_csv(base / "ranked_engagers.csv")
+    reject_core_exports(rows)
     icp = json.loads((base / "recipient_icp.json").read_text(encoding="utf-8"))
     posts_path = base / "posts.json"
     posts = {p.get("postId"): p for p in json.loads(posts_path.read_text(encoding="utf-8"))} if posts_path.exists() else {}

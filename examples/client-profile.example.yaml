@@ -1,0 +1,63 @@
+schema_version: 2
+name: example-buyers
+business:
+  name: Example Sales Software
+  website: https://seller.example
+  one_liner: Sales software for B2B teams and agency partners.
+  best_customers: []
+segments:
+  - id: core
+    name: Direct buyers
+    company:
+      - id: core-industry
+        field: description
+        operator: semantic
+        value: B2B software companies
+        description: The company sells B2B software.
+        mode: mandatory
+      - id: core-size
+        field: headcount
+        operator: range
+        value: [50, 2000]
+        mode: preferred
+    person:
+      - id: core-role
+        field: title
+        operator: semantic
+        value: Sales or Revenue Operations leadership
+        description: Owns Sales or Revenue Operations decisions.
+        mode: mandatory
+    signals:
+      - id: core-hiring
+        kind: hiring_sdr
+        entity: company
+        description: Hiring sales development representatives.
+        evidence_required: A dated job listing for an SDR role with a source URL.
+        max_age_days: 90
+        mandatory: false
+  - id: partners
+    name: Agency partners
+    company:
+      - id: partner-category
+        field: description
+        operator: semantic
+        value: B2B marketing or GTM agency
+        mode: mandatory
+      - id: partner-team
+        field: team_headcount
+        operator: range
+        value: [10, 1000]
+        description: Sales development or qualification team size, not total employees.
+        mode: preferred
+    person:
+      - id: partner-role
+        field: title
+        operator: semantic
+        value: Agency owner or CEO
+        mode: mandatory
+    signals: []
+offer:
+  cta: ''
+  lead_magnet: ''
+tone: ''
+constraints: ''

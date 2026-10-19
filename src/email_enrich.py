@@ -7,11 +7,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 try:
     from . import getleads, ledger
-    from .common import qualification_ok, fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
+    from .common import reject_core_exports, qualification_ok, fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
 except ImportError:
     import getleads
     import ledger
-    from common import qualification_ok, fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
+    from common import reject_core_exports, qualification_ok, fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
 
 FIELDS = ['email', 'email_status', 'sendable', 'email_provider', 'email_checked_at', 'miss_reason']
 
@@ -110,6 +110,7 @@ def main():
     if args.max_lookups < 1 or args.cache_days < 1:
         ap.error('Lookup cap and cache days must be positive')
     rows, fields = read_csv(args.input)
+    reject_core_exports(rows)
     base = Path(args.input).parent
     try:
         with ledger.connect() as con:

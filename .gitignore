@@ -14,3 +14,7 @@ targets.txt
 *.prospeo-cache.json
 *.smartlead.json
 *.supabase.json
+
+profiles/
+*.sqlite
+*.sqlite-*

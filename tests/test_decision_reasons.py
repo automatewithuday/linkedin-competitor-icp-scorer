@@ -52,7 +52,7 @@ class DecisionReasonTests(unittest.TestCase):
         return path
 
     def run_rank(self, base, scores=None, min_fit=4):
-        args = ['rank.py', '--slug', base.name, '--output-dir', str(self.root), '--min-fit', str(min_fit)]
+        args = ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--min-fit', str(min_fit)]
         if scores:
             args += ['--scores', str(scores)]
         with patch('sys.argv', args):

@@ -108,7 +108,7 @@ def extract_company(item: dict) -> dict:
     }
 
 
-def main() -> None:
+def legacy_main() -> None:
     ap = argparse.ArgumentParser(description="Enrich engager companies via LinkedIn company actor")
     ap.add_argument("--slug", required=True, help="Slug matching harvest output")
     src = ap.add_mutually_exclusive_group()
@@ -189,6 +189,21 @@ def main() -> None:
     print(f"  -> {out_dir / 'companies.json'}")
     if items:
         print(f"  raw item[0] keys  : {', '.join(sorted(items[0].keys()))}")
+
+
+def main():
+    if '--legacy' in sys.argv:
+        original=sys.argv;sys.argv=[x for x in original if x!='--legacy']
+        try:return legacy_main()
+        finally:sys.argv=original
+    sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
+    from src import coredb, profiles, qualify, company_stage
+    ap=argparse.ArgumentParser(description='Enrich linked current companies for the qualification core')
+    ap.add_argument('--slug',required=True);ap.add_argument('--icp',required=True);ap.add_argument('--output-dir',default='./output')
+    ap.add_argument('--dry-run',action='store_true');ap.add_argument('--max-lookups',type=int,default=10);ap.add_argument('--max-usd',type=float,default=0.25)
+    a=ap.parse_args();con=coredb.connect();v=profiles.load(con,a.icp)
+    coredb.import_saved(con,Path(a.output_dir)/a.slug)
+    company_stage.enrich_companies(con,qualify.version(con,v['id']),a.slug,a.max_lookups,a.max_usd,a.dry_run)
 
 
 if __name__ == "__main__":

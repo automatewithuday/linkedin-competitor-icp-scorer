@@ -9,10 +9,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import qualification_ok, atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
+    from .common import reject_core_exports, qualification_ok, atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from .activity_intel import username
 except ImportError:
-    from common import qualification_ok, atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
+    from common import reject_core_exports, qualification_ok, atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from activity_intel import username
 
 FIELDS = ['linkedin_outreach_ready', 'outreach_ready_probability', 'outreach_reason', 'activity_reason', 'activity_model', 'activity_status',
@@ -100,6 +100,7 @@ def main():
     ap.add_argument('--from-raw', help='re-judge a cached run without Apify: <output stem>/raw/<run>')
     args = ap.parse_args()
     rows, fields = read_csv(args.input)
+    reject_core_exports(rows)
     work = Path(args.output).with_suffix('')  # output/<slug>/activity/
     urls = list(dict.fromkeys(u for u, _ in (eligible(r, args.min_fit) for r in rows) if u))
     print(f'Rows: {len(rows)}; eligible profiles: {len(urls)}', file=sys.stderr)

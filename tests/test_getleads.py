@@ -65,7 +65,7 @@ class GetLeadsTests(unittest.TestCase):
              'needs_review': False, 'qualification_reason': 'Sales buyer evidence assessed; unknown criteria require review.',
              'intent_reason': 'No comment intent.', 'score_context': ledger.score_context(e, recipient, rank.SYSTEM)}
             for i, e in enumerate(people)]})
-        with patch('sys.argv', ['rank.py', '--slug', base.name, '--output-dir', str(self.root), '--scores', str(scores)]):
+        with patch('sys.argv', ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--scores', str(scores)]):
             rank.main()
         return scores
 
@@ -188,7 +188,7 @@ class GetLeadsTests(unittest.TestCase):
                 self.person()['linkedinUrl']: ('matched', self.normalized())}):
             self.invoke(base)
         self.assertEqual(ledger.filter_export_rows(self.con, old_rows), ([], 1))
-        with patch('sys.argv', ['rank.py', '--slug', base.name, '--output-dir', str(self.root), '--scores', str(scores)]):
+        with patch('sys.argv', ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--scores', str(scores)]):
             with self.assertRaisesRegex(SystemExit, 'Stale or unbound'):
                 rank.main()
         self.score(base)
@@ -274,7 +274,7 @@ class GetLeadsTests(unittest.TestCase):
         def execute(label, cmd):
             with patch('sys.argv', cmd[1:]):
                 modules[cmd[1]].main()
-        args = ['run.py', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
+        args = ['run.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
                 '--no-resolve', '--icp', str(manual), '--scores', str(scores), '--getleads', '--find-emails']
         with patch.object(pipeline, 'run_step', side_effect=execute), patch.object(getleads, 'allowance', return_value=(10, 'credits')), \
                 patch.object(getleads, 'enrich_batch', return_value={self.person()['linkedinUrl']: ('matched', self.normalized())}) as req:

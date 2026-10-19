@@ -100,6 +100,18 @@ def normalize(data):
 def enrich_batch(urls, key):
     response = request('POST', '/enrich/from-linkedin', key,
                        json={'items': [{'linkedin_url': u} for u in urls], 'limit_per_item': 1})
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from src import coredb
+    with coredb.connect() as evidence_db:
+        rid = coredb.new_request(evidence_db, 'getleads', 'from_linkedin', coredb.fingerprint(urls),
+                                {'input': {'items': urls}}, os.getenv('CORE_RUN_SLUG'), status='complete')
+        root_id = coredb.raw(evidence_db, rid, 'response', response)
+        if isinstance(response.get('results'), list):
+            for index, result in enumerate(response['results']):
+                if isinstance(result, dict):
+                    echoed = result.get('linkedin_url') or result.get('linkedinUrl')
+                    coredb.raw(evidence_db, rid, linkedin_url(echoed) or str(index), result, source_raw_id=root_id)
     results = response.get('results')
     if not isinstance(results, list):
         raise ProviderError('GetLeads omitted batch results.', unknown=True)

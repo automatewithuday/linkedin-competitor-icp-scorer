@@ -165,6 +165,12 @@ def find_contact(con, aliases):
 
 def merge(con, keep, drop):
     """Two records turned out to be one person (an id seen alone in one run, a URL alone in another)."""
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='core_run_contacts'").fetchone():
+        try:
+            from .coredb import merge_contacts
+        except ImportError:
+            from src.coredb import merge_contacts
+        merge_contacts(con, keep, drop)
     for r in con.execute('SELECT * FROM campaign_contacts WHERE contact_id=?', (drop,)).fetchall():
         save_campaign(con, keep, r['campaign'], r['status'], r['email'], r['receipt'], r['updated_at'])
     con.execute('DELETE FROM campaign_contacts WHERE contact_id=?', (drop,))

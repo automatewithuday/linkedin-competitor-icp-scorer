@@ -1,12 +1,7 @@
-"""Orchestrator: harvest -> (enrich) -> icp -> rank -> profile lookups -> rescore -> (draft) -> (activity) -> (emails) -> (supabase) -> (smartlead preview) -> summary
+"""Qualification core entrypoint. Use --legacy only to inspect/reproduce the archived workflow.
 
-Usage:
-  uv run run.py --profile <linkedin-url> --slug <slug> --icp icp.yaml --scores output/<slug>/scores.json [options]
-  uv run run.py --post <post-url>        --slug <slug> --icp icp.yaml --scores ... [options]   # one post only
-  uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores ...                        # reuse a paid harvest
-
-Scoring: pass --scores (judgments made in-session; see src/rank.py --dump), or let the configured LLM score:
-OPENAI_API_KEY, else the `claude` CLI when installed (LLM_PROVIDER forces one).
+Default workflow: guided ICP -> calibration -> saved evidence -> company qualification -> person qualification -> CSV.
+See docs/OPERATIONS.md for commands. No campaign stages run in the core.
 """
 import argparse
 import os
@@ -26,7 +21,7 @@ def run_step(label: str, cmd: list[str]) -> None:
         sys.exit(f"Step failed: {label} (exit {result.returncode})")
 
 
-def main() -> None:
+def legacy_main() -> None:
     ap = argparse.ArgumentParser(
         description="Full pipeline: harvest LinkedIn engagers, derive ICP, rank as warm buyers"
     )
@@ -137,7 +132,7 @@ def main() -> None:
     # Step 2 (optional): Enrich companies
     if args.enrich:
         enrich_cmd = [
-            py, "src/enrich.py",
+            py, "src/enrich.py", "--legacy",
             "--slug", slug,
             "--from-engagers",
             "--output-dir", out,
@@ -161,7 +156,7 @@ def main() -> None:
 
     # Step 4: Rank
     rank_cmd = [
-        py, "src/rank.py",
+        py, "src/rank.py", "--legacy",
         "--slug", slug,
         "--output-dir", out,
         "--min-fit", str(args.min_fit),
@@ -225,6 +220,18 @@ def main() -> None:
     print(f"  Ranked CSV : {out_csv.resolve()}")
     print(f"  Final CSV  : {final_csv.resolve()}")
     print(f"{'='*60}")
+
+
+def main():
+    if '--legacy' in sys.argv:
+        original = sys.argv
+        sys.argv = [arg for arg in sys.argv if arg != '--legacy']
+        try:
+            return legacy_main()
+        finally:
+            sys.argv = original
+    from src.core import main as core_main
+    return core_main()
 
 
 if __name__ == "__main__":

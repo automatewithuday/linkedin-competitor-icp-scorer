@@ -6,10 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json
+    from .common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json
     from . import ledger
 except ImportError:
-    from common import qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json
+    from common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json
     import ledger
 
 
@@ -85,6 +85,7 @@ def main():
     if args.campaign_id <= 0 or args.max_email_age_days <= 0:
         ap.error('Campaign ID and email age must be positive')
     rows, _ = read_csv(args.input)
+    reject_core_exports(rows)
     con = ledger.connect()
     rows, dropped = ledger.filter_export_rows(con, rows, Path(args.input).parent)
     leads, excluded = select_leads(rows, args.min_fit, args.max_email_age_days)

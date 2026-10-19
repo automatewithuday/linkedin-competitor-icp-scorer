@@ -281,7 +281,7 @@ class ScorerAndSummaryTests(unittest.TestCase):
                                                       {'i': 1, 'icp_fit': 1, 'intent': None}]}))
             bind_scores(base, scores)
             with patch.dict('os.environ', {'OPENAI_API_KEY': ''}), \
-                 patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+                 patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             rows, cols = common.read_csv(base / 'ranked_engagers.csv')
         score_batch.assert_not_called()
@@ -429,7 +429,7 @@ class LockedVersionTests(unittest.TestCase):
             base = Path(d) / 's'; base.mkdir()
             (base / 'engagers.json').write_text('[{"id": "A", "name": "J"}]'); (base / 'recipient_icp.json').write_text('{}')
             with patch.dict('os.environ', {'CLAUDECODE': '1', 'LLM_PROVIDER': '', 'OPENAI_API_KEY': 'k'}), \
-                 patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d]), self.assertRaises(SystemExit):
+                 patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d]), self.assertRaises(SystemExit):
                 rank.main()
         score_batch.assert_not_called()
 
@@ -443,7 +443,7 @@ class LockedVersionTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 2, 'intent': 'high'}, {'i': 1, 'icp_fit': 4, 'intent': None}]}))
             bind_scores(base, scores)
-            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+            with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             rows, _ = common.read_csv(base / 'ranked_engagers.csv')
         self.assertEqual([r['name'] for r in rows], ['Buyer', 'Commenter'])  # 2*(1+ln3)*1.0 > 4*0.3, still second
@@ -562,7 +562,7 @@ class ReviewFindingTests(unittest.TestCase):
                 (base / f).write_text('[]')
             icp_path, scores = Path(d) / 'icp.yaml', Path(d) / 'scores.json'
             icp_path.write_text('titles: []'); scores.write_text('{"results": []}')
-            argv = ['run.py', '--slug', 's', '--output-dir', d, '--skip-harvest', '--icp', str(icp_path),
+            argv = ['run.py', '--legacy', '--slug', 's', '--output-dir', d, '--skip-harvest', '--icp', str(icp_path),
                     '--scores', str(scores), '--activity', '--find-emails']
             with patch.dict('os.environ', {'TYPESAFE_API_KEY': 'x', 'GETLEADS_API_KEY': 'x'}), \
                  patch('run.subprocess.run', side_effect=fake), patch('sys.argv', argv), self.assertRaises(SystemExit):
@@ -583,7 +583,7 @@ class ReviewFindingTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': 'high', 'evidence_comment': 2}]}))
             bind_scores(base, scores)
-            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+            with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
         self.assertTrue(row['comment_excerpt'].startswith('We are evaluating vendors'))
@@ -597,7 +597,7 @@ class ReviewFindingTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': None, 'company_guess': None}]}))
             bind_scores(base, scores)
-            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+            with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
         self.assertEqual((row['company_guess'], row['company_source']), ('Acme', 'profile'))
@@ -676,13 +676,13 @@ class LedgerTests(unittest.TestCase):
         ledger.record_scores(ledger.connect(), engs[:1], [explained({'icp_fit': 5, 'intent': None, 'clean_title': 'CRO'})],
                              {'titles': ['CRO']}, rank.SYSTEM, 'in-session', 'old')
         out = io.StringIO()
-        with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--dump']), patch('sys.stdout', out):
+        with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', self.tmp.name, '--dump']), patch('sys.stdout', out):
             rank.main()
         self.assertIn('1. New', out.getvalue()); self.assertNotIn('0. Seen', out.getvalue())
         scores = Path(self.tmp.name) / 'scores.json'
         scores.write_text(json.dumps({'results': [{'i': 1, 'icp_fit': 2, 'intent': None}]}))  # only the pending row
         bind_scores(base, scores)
-        with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--scores', str(scores)]):
+        with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', self.tmp.name, '--scores', str(scores)]):
             rank.main()
         rows = {r['name']: r['icp_fit'] for r in common.read_csv(base / 'ranked_engagers.csv')[0]}
         self.assertEqual(rows, {'Seen': '5', 'New': '2'})
