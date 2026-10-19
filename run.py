@@ -53,6 +53,8 @@ def main() -> None:
     ap.add_argument("--max-lookups", type=int, default=100)
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
     ap.add_argument("--campaign-id", type=int, help="Generate a Smartlead import preview")
+    ap.add_argument("--resolve-batch", type=int, default=0, metavar="N",
+                    help="ids per profile-scraper run for resolve (0 = one run; Apify free plan allows 10)")
     ap.add_argument("--no-resolve", action="store_true",
                     help="Skip resolving qualified opaque /in/ACoAA... engagers to public URLs "
                          "(default: on; Apify, $0.004 per qualified opaque profile)")
@@ -159,7 +161,8 @@ def main() -> None:
     if not args.no_resolve:
         final_csv = out_csv.with_name("resolved.csv")
         run_step("Resolve opaque profile IDs", [py, "src/resolve.py", "--input", str(out_csv),
-                 "--output", str(final_csv), "--min-fit", str(args.min_fit)])
+                 "--output", str(final_csv), "--min-fit", str(args.min_fit)]
+                 + (["--batch-size", str(args.resolve_batch)] if args.resolve_batch else []))
     if args.activity:
         activity_csv = out_csv.with_name("activity.csv")
         run_step("LinkedIn activity intel", [py, "src/activity.py", "--input", str(final_csv),

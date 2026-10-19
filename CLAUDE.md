@@ -19,3 +19,5 @@ For recurring sweeps choose a dated slug for each target. Reuse a run ID only fo
 `--activity` (or `src/activity.py` standalone) spends Apify at about $0.04 per profile. Run `src/activity.py --dry-run` first and state the estimate and hard cap before a paid run. `activity.toml` is user-owned: propose changes, never edit it. The `/setup` and `/first-run` commands cover onboarding.
 
 Validation: `uv run python -m unittest discover -s tests -v`.
+
+The Apify free plan caps the profile scraper at 10 ids per run; `--resolve-batch 10` paces resolve around it only when the user asks.

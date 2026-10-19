@@ -49,13 +49,22 @@ def parse(items, status):
     return found, status == 'SUCCEEDED' and not errors
 
 
-def scrape(ids, token):
-    """One actor run over ids. Raises on API failure."""
+def scrape(ids, token, batch_size=0):
+    """Actor run(s) over ids: one run, or one per batch of batch_size (HarvestAPI allows 10 items per run on the
+    Apify free plan; batching is the user's call, so it is off unless --batch-size is given). Raises on API failure."""
     from apify_client import ApifyClient
     client = ApifyClient(token)
-    run = client.actor(ACTOR).call(run_input={'profileIds': ids, 'profileScraperMode': MODE},
-                                   max_total_charge_usd=cap(len(ids)), logger=None)
-    return parse(client.dataset(run.default_dataset_id).list_items().items, run.status)
+    found, ok = {}, True
+    chunks = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)] if batch_size else [ids]
+    for n, chunk in enumerate(chunks, 1):
+        if len(chunks) > 1:
+            print(f'Resolve batch {n}/{len(chunks)}: {len(chunk)} ids', file=sys.stderr)
+        run = client.actor(ACTOR).call(run_input={'profileIds': chunk, 'profileScraperMode': MODE},
+                                       max_total_charge_usd=cap(len(chunk)), logger=None)
+        got, good = parse(client.dataset(run.default_dataset_id).list_items().items, run.status)
+        found |= got
+        ok = ok and good
+    return found, ok
 
 
 def main():
@@ -65,6 +74,8 @@ def main():
     ap.add_argument('--output', required=True)
     ap.add_argument('--min-fit', type=int, choices=range(1, 6), default=4)
     ap.add_argument('--dry-run', action='store_true', help='print id count, estimate and hard cap; spend nothing')
+    ap.add_argument('--batch-size', type=int, default=0,
+                    help='ids per actor run (0 = one run). The Apify free plan allows 10 per run on this actor')
     args = ap.parse_args()
     rows, fields = read_csv(args.input)
     ids = list(dict.fromkeys(i for i in (opaque_id(r) for r in rows if fit(r) >= args.min_fit) if i))
@@ -80,7 +91,7 @@ def main():
         try:
             if not token:
                 raise RuntimeError('APIFY_TOKEN is not set')
-            found, ok = scrape(ids, token)
+            found, ok = scrape(ids, token, args.batch_size)
         except Exception as exc:  # keep the other rows moving; the error column says what happened
             print(f'Resolve run failed ({type(exc).__name__}); marking {len(ids)} rows error', file=sys.stderr)
             failed = True
