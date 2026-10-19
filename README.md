@@ -1,180 +1,63 @@
 # LinkedIn Competitor ICP Scorer
 
-**Turn the people engaging with your competitors' LinkedIn posts into a ranked list of warm leads that match your ideal customer.**
+**Turn the people engaging with a competitor's LinkedIn posts into an outreach shortlist scored against your ideal customer profile.**
 
-When a competitor's founder posts on LinkedIn, the people who like and comment are telling you something: they care about the problem you solve. This tool collects those people, scores each one against your ideal customer profile (ICP) with an LLM, and gives you a spreadsheet sorted by who is most worth reaching out to. Optionally it finds their work email and stages them for a cold email campaign.
+Give Claude Code a competitor founder's profile or a specific post. It collects the people who reacted or commented, checks their fit against the buyers you want, and returns a ranked CSV with a summary in chat.
 
 ## How it works
 
-```
- Competitor's LinkedIn profile        ─ or ─        one post link (--post, lnkd.in works)
-            │
-            ▼
- 1. Harvest      Everyone who reacted or commented, with their headline        (Apify)
-                 (post mode also returns each person's location + employer)
-            │
-            ▼
-    Ledger       Remember each person across runs and competitors      data/ledger.sqlite
-            │
-            ▼
- 2. Load ICP     Read who you sell to from icp.yaml                             (you)
-            │
-            ▼
- 3. Score        Rate every engager 1–5 on ICP fit + read comments for intent
-                 (Claude in-session, or automatically via OpenAI / claude CLI)
-            │
-            ▼
- 4. Profile      Look up hidden profile ids of fit-3+ candidates: public URL,   (Apify)
-    pass         location, employer. Rescore those rows so geography and
-                 employer rules count. Already-paid lookups are reused.
-            │
-            ▼
- 5. Rank         Qualified (fit 4–5) first, then fit × engagement × intent    ──▶  ranked_engagers.csv
-            │
-            ▼
-    Gate         Skip anyone suppressed, already in a campaign, or scored on
-                 stale evidence. Every step below takes only eligible rows.
-            │
-            ▼  (optional flags)
- 6. Activity     Is each qualified lead active on LinkedIn right now?           ──▶  activity.csv
- 7. Draft        Connection note + DM per qualified lead, one playbook template ──▶  drafts.csv
- 8. Emails       Find verified work emails                                      ──▶  enriched.csv
- 9. Push         Stage a Smartlead (email) or HeyReach (LinkedIn) import;    (Smartlead / HeyReach)
-                 you approve before anything sends
-            │
-            ▼
- Summary         Counts + the top leads by name, printed at the end of every run
-```
+1. **Define your buyers.** Share your website, target roles, industries, company size and countries.
+2. **Paste a LinkedIn link.** Use a personal profile or a specific post. Company pages are not supported.
+3. **Review your shortlist.** See who matches, what they said, and who is worth researching for outreach.
 
-Steps 1 to 5, the ledger and the gate always run. Steps 6 to 9 are opt-in flags (`--activity`, `--draft`, `--find-emails`, `--campaign-id` / `--heyreach-list-id`). Nothing sends without a separate `--execute`.
+## Get started with Claude Code
 
-## What you get
+You need [Claude Code](https://claude.com/claude-code), Python 3.11+, [uv](https://docs.astral.sh/uv/) and an [Apify](https://apify.com) API token. Apify charges apply to data collection; the first-run workflow shows the estimated spend before running. Scoring in your Claude Code session needs no separate OpenAI API key.
 
-A CSV with one row per engager, qualified leads first, plus a summary with names printed in your terminal or chat. The final file is the last stage you ran: `ranked_engagers.csv`, then `activity.csv`, then `enriched.csv`. The columns that matter:
-
-| column | meaning |
-|---|---|
-| `icp_fit` | 1 to 5. How well they match your ICP, using headline, location and employer when known. 4 and 5 are qualified and always sort first. |
-| `intent` | `high`, `medium`, or `low`. From their comment if they left one; reactions alone are always `low`. |
-| `engagement_count` | How many of the competitor's posts they touched. Repeat engagers rank higher. |
-| `rank_score` | Fit, engagement and intent combined. Orders leads within the qualified group and within the rest. |
-| `comment_excerpt`, `comment_post_url` | The comment their intent rests on (not just their first one) and the post it was left on, so your first message can reference it. |
-| `linkedin_url`, `company_guess`, `company_source`, `clean_title`, `location` | Who they are. `company_source` is `profile` when the employer comes from their LinkedIn profile, `headline` when it was read from the headline. |
-| `resolve_status` | `resolved` when a hidden profile id was looked up before final scoring; `not_found` when LinkedIn had no public profile for it. |
-| `linkedin_outreach_ready`, `outreach_ready_probability`, `outreach_reason`, `activity_status` | With `--activity`: are they active on LinkedIn now, and why. |
-| `email`, `email_status`, `sendable` | With `--find-emails`: a verified work email when Prospeo has one. |
-
-See [examples/ranked_engagers.sample.csv](examples/ranked_engagers.sample.csv) for a full sample.
-
-## Quickstart
-
-Supported inputs: a personal LinkedIn profile (`linkedin.com/in/...`, such as a competitor founder or an influencer your buyers follow) or one specific post (`linkedin.com/posts/...`, `/feed/update/...`, or an `lnkd.in` link to one). Company pages (`linkedin.com/company/...`) are not supported.
-
-You need Python 3.11+ with [uv](https://docs.astral.sh/uv/), an [Apify](https://apify.com) token, and a scorer. Inside Claude Code the agent scores in-session (`/setup` and `/first-run` walk you through it, no key). For unattended runs use an OpenAI API key or your Claude subscription through the `claude` CLI (run `claude` once to log in).
+Clone the repo and open Claude Code:
 
 ```bash
 git clone https://github.com/automatewithuday/linkedin-competitor-icp-scorer.git
 cd linkedin-competitor-icp-scorer
-uv sync                     # or: python3 -m venv .venv && pip install -r requirements.txt
-cp .env.example .env        # add APIFY_TOKEN; scoring needs no key inside Claude Code (see below)
-uv run setup_icp.py         # give it your website, confirm the proposed ICP -> writes icp.yaml
+claude
 ```
 
-Then run it against one competitor, small and cheap:
+Then run these commands **inside Claude Code**, one at a time:
 
-```bash
-uv run run.py \
-  --profile https://www.linkedin.com/in/COMPETITOR-FOUNDER \
-  --slug first-test \
-  --icp icp.yaml \
-  --max-posts 3 --max-reactions 20 --max-comments 10
+```text
+/setup
 ```
 
-Have one post rather than a profile? Harvest just that post (full URL or `lnkd.in` link), then score and continue:
+This installs dependencies, helps you add your API token locally to `.env`, and defines your ideal customer profile.
 
-```bash
-uv run src/harvest.py --post https://lnkd.in/p/XXXX --slug first-post --max-reactions 100 --max-comments 50
-uv run run.py --slug first-post --skip-harvest --icp icp.yaml   # add --scores output/first-post/scores.json if you scored in-session
+```text
+/first-run
 ```
 
-Open `output/first-test/ranked_engagers.csv`. That run costs well under a dollar of Apify credit and finishes in a few minutes.
+Paste a competitor founder's LinkedIn profile or a post link when asked. Claude starts with a small sample, scores the engagers and shows the results in chat.
 
-## Also in the box
+Accepted links include `linkedin.com/in/...`, `linkedin.com/posts/...`, `linkedin.com/feed/update/...` and `lnkd.in` links to posts.
 
-- **One post instead of a profile.** `--post <url>` (full URL or `lnkd.in` link) harvests exactly that post's engagers, with nearly every engager's public profile URL, location and company. See [docs/OPERATIONS.md](docs/OPERATIONS.md#single-post-harvest).
-- **Who is actually on LinkedIn right now.** `--activity` checks each qualified lead's recent posts, comments and reactions and adds an outreach-ready verdict (about $0.04 per profile, needs `TYPESAFE_API_KEY`). See [docs/OPERATIONS.md](docs/OPERATIONS.md#linkedin-activity-check-optional).
-- **No lost reactors.** Reaction-only engagers come back from LinkedIn with opaque ids; the pipeline resolves the qualified ones to public URLs so they can be emailed and checked. See [docs/OPERATIONS.md](docs/OPERATIONS.md#opaque-profile-ids).
-- **A summary you can read in chat.** Every run ends with counts and the top rows by name, so you never have to open the CSV.
-- **Memory across runs.** A local SQLite ledger keeps one record per person across every run and competitor: their engagements, profile evidence, lookups, scores per ICP, and campaign history. A score is reused only while its evidence, ICP and rubric are unchanged; anyone already imported to a campaign, or on your do-not-contact list, is never pushed again. See [docs/OPERATIONS.md](docs/OPERATIONS.md#ledger-sqlite).
-- **Scoring without an API key.** In Claude Code the agent judges the engagers itself and hands the pipeline a `scores.json`. See [docs/OPERATIONS.md](docs/OPERATIONS.md#scoring-llm).
+## What you get
 
-## Defining your ICP (the part most people get stuck on)
+- **People and profile links**, with their title, employer and location when available.
+- **An ICP fit score from 1–5**, with scores of 4–5 meeting the default qualification threshold.
+- **Comment-based intent**, with the supporting comment and post link. Reactions alone count as low intent.
+- **A ranked CSV** at `output/<run>/ranked_engagers.csv`, plus a readable summary in chat.
 
-`setup_icp.py` does not expect you to know your ICP up front. Give it your website and it proposes one (titles, industries, size, countries, customers named on the site) that you confirm or correct in nine short questions. It then expands every job title into the synonyms that actually show up in LinkedIn headlines, because "VP Sales" alone would miss "Head of Sales". Works without Firecrawl; a plain page fetch is used when no key is set. If you have no website, answer from scratch.
+Fit is an estimate based on available evidence. Review shortlisted people before outreach. For better results, choose profiles your buyers actually follow; some competitor audiences contain mostly peers and other vendors.
 
-Two things it will push you on: name one to three real best customers, and give headcount as numbers, not "SMB". Buying triggers are recorded but never used to reject anyone.
+[See an example CSV](examples/ranked_engagers.sample.csv).
 
-## What to expect
+## Optional next steps
 
-Honest numbers from testing this on three outbound-agency founders' profiles, 3 posts each: 136 engagers scored, 2 qualified. The scoring was right. The audiences were wrong.
+Draft connection notes and DMs, check recent LinkedIn activity, find verified work emails, or preview an import into HeyReach or Smartlead. These integrations may need additional API keys and credits. Campaign imports require a separate `--execute` command.
 
-**The target profile matters more than anything else.** People who engage with a vendor's posts are mostly other vendors, consultants, and peers. To find buyers, pick profiles your buyers actually follow: a product founder in your category, a well-known voice with your buyer's job title, an analyst. The scorer is deliberately stingy and will tell you quickly whether a profile's audience is worth mining.
+For repeat runs, the local database remembers people, reuses completed lookups and unchanged scores, and checks recorded campaign history and your do-not-contact list.
 
-Once you find a good profile, scale up: `--max-posts 10` with default caps gives roughly four times the sample.
+## More details
 
-## Going further
+- [Commands, integrations, costs and upgrade instructions](docs/OPERATIONS.md)
+- [Outreach playbooks](playbooks/copy-templates.md)
 
-- **Get emails and push to a campaign**: add `--find-emails` and `--campaign-id` for Smartlead email campaigns, or `--heyreach-list-id` for HeyReach LinkedIn outreach (no email needed; drafts ride along as custom fields). Nothing sends without an explicit `--execute` on a separate command. Details in [docs/OPERATIONS.md](docs/OPERATIONS.md).
-- **Tune the scoring**: your ICP lives in `icp.yaml` (titles, industries, exclusions, disqualifiers, triggers). Rescore a saved harvest without paying Apify again:
-  ```bash
-  uv run src/icp.py --slug first-test --icp icp.yaml
-  uv run src/rank.py --slug first-test          # or --scores output/first-test/scores.json (in-session)
-  ```
-- **Write the outreach**: add `--draft` (or run `uv run src/draft.py --slug first-test`) to get `drafts.csv` with a LinkedIn connection note and a DM for every lead at fit 4+. Each row is written strictly inside one of the three openers in [playbooks/copy-templates.md](playbooks/copy-templates.md), picked by the fit/intent/comment table there. `--min-fit 3` also drafts the Integration-Partner note for adjacent vendors. Nothing is sent; read and edit before use. The playbooks folder also has a positioning play and a battle-card prompt for writing by hand.
-- **Run weekly**: list profiles in `targets.txt` and use the `/weekly-sweep` command in Claude Code.
-- **Store history**: optional Supabase export keeps every run's scores.
-
-## Upgrading scoring and exports
-
-When scoring in-session, copy each row's `score_context` from `rank.py --dump` into its result in `scores.json`. Existing score files and exports from older releases need a new scoring review and ledger gate; lookup history is retained. Imports recheck the current ledger, and mixed import outcomes require reconciliation. See [scoring provenance and upgrades](docs/OPERATIONS.md#ledger-sqlite) for the operating rules.
-
-## Costs
-
-| what | cost |
-|---|---|
-| Apify harvest | profile mode: about $0.002 per item. 3 posts with small caps is under $0.20; 10 posts at default caps is $2 to $3. Single post (`--post`): about $0.004 per engager, full profiles included. |
-| Resolve hidden profile ids | $0.004 per candidate (fit 3+) with an opaque id, resolved before final scoring so location counts; on by default, `--no-resolve` skips it. Reruns reuse earlier results. |
-| Ledger (`data/ledger.sqlite`) | free; local file, no service. |
-| Activity check (`--activity`) | about $0.04 per qualified profile (Apify) plus a negligible TypeSafe charge. |
-| Scoring with OpenAI | under one cent per 100 engagers on `gpt-4.1-mini`. |
-| Scoring with Claude subscription | no dollars; counts against your plan's usage limits. |
-| Prospeo emails | per lookup, capped at 100 per run by default. |
-
-## Repo map
-
-```
-run.py                one command that runs the whole pipeline
-setup_icp.py          interactive ICP intake -> icp.yaml
-src/harvest.py        Apify: a profile's posts + engagers, or one post (--post)
-src/icp.py            load icp.yaml (or infer an ICP from a website with --domain)
-src/rank.py           scoring + qualified-first ranking; --dump / --scores for in-session scoring
-src/resolve.py        hidden profile ids -> public URL, location, employer
-src/activity.py       LinkedIn activity check (wraps src/activity_intel.py, vendored)
-src/draft.py          outreach drafts from playbook templates
-src/email_enrich.py   Prospeo
-src/push_heyreach.py  HeyReach list/campaign push (LinkedIn)
-src/push.py           Smartlead preview / import
-src/summary.py        the end-of-run summary with names
-src/ledger.py         SQLite ledger: people, engagements, evidence, scores per ICP, campaigns, suppressions
-src/common.py         shared helpers, including the OpenAI-or-Claude switch
-activity.toml         activity-check caps, threshold and question wording (yours to tune)
-.claude/commands/     /setup, /first-run, /weekly-sweep for Claude Code
-docs/OPERATIONS.md    full command reference and every caveat
-docs/SCHEMAS.md       Apify actor input/output shapes
-playbooks/            outreach copy and positioning
-tests/                mocked, no API spend: uv run python -m unittest discover -s tests
-```
-
-## Credits
-
-Adapted from [LeadGrowGTM/linkedin-warm-leads](https://github.com/LeadGrowGTM/linkedin-warm-leads), MIT licensed. This version calls provider APIs directly and does not require Deepline.
+Prefer running commands directly in your terminal? The [operations guide](docs/OPERATIONS.md) covers that workflow too.
