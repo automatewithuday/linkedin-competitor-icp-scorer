@@ -149,6 +149,20 @@ class GetLeadsTests(unittest.TestCase):
             self.invoke(complete)
         req.assert_not_called()
 
+    def test_rescored_rejection_keeps_the_completed_lookup_status_without_spend(self):
+        base = self.seed()
+        url = self.person()['linkedinUrl']
+        with patch.object(getleads, 'allowance', return_value=(10, 'credits')), patch.object(getleads, 'enrich_batch',
+                return_value={url: ('matched', self.normalized())}) as req:
+            self.invoke(base)
+            common.write_csv(base / 'ranked_engagers.csv', [{'actor_id': self.person()['id'], 'icp_fit': 2}],
+                             ['actor_id', 'icp_fit'])
+            self.invoke(base)
+        self.assertEqual(req.call_count, 1)
+        person = json.loads((base / 'engagers.json').read_text())[0]
+        self.assertEqual(person['getleads_status'], 'matched')
+        self.assertEqual(person['icp_enrichment']['company_size'], '51 to 200')
+
     def test_matches_and_misses_reuse_across_runs_and_preserve_new_scraped_employer(self):
         people = [self.person(), self.person(2)]
         first = self.seed(people=people)

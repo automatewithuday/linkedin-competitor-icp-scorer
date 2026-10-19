@@ -223,7 +223,11 @@ def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=C
                            (PROVIDER, base.name)).fetchone()[0]
         for i, e in enumerate(engagers):
             url = linkedin_url(e.get('linkedinUrl'))
-            e['getleads_status'] = 'below_min_fit'
+            hit = cached(con, url) if url else None
+            # A later rejection does not erase the fact that this person was already looked up.
+            e['getleads_status'] = hit['status'] if hit and hit['status'] in ('matched', 'not_found') else 'below_min_fit'
+            if hit:
+                e['getleads_checked_at'] = hit['checked_at']
             if fits.get(e.get('id'), 0) < min_fit:
                 continue
             e['getleads_status'] = 'missing_public_url'
@@ -233,9 +237,6 @@ def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=C
             e['getleads_status'] = status
             if status != 'eligible':
                 continue
-            hit = cached(con, url)
-            if hit:
-                e['getleads_checked_at'] = hit['checked_at']
             if hit and hit['status'] == 'matched':
                 apply(e, json.loads(hit['data']), hit['checked_at'])
             if fresh(hit, cache_days):
@@ -255,7 +256,7 @@ def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=C
         urls = list(todo)[:max(0, max_lookups - used)]
         print(f'GetLeads: {candidates} identities need lookup; {len(urls)} planned; '
               f'{used}/{max_lookups} submissions already recorded for this slug. '
-              f'At most {len(urls)} plan credits (misses billed too), or included fair-use rows; no wallet scrape.')
+              f'At most {len(urls)} plan credits (misses included in budget), or included fair-use rows; no wallet scrape.')
         if held:
             print(f'GetLeads: {len(held)} pending/unknown submissions held; check the provider before --retry-unknown.')
         if dry_run:
