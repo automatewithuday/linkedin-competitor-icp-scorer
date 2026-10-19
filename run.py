@@ -11,7 +11,7 @@ import argparse
 import os
 import re
 from dotenv import load_dotenv
-from src.common import linkedin_url
+from src.common import linkedin_url, llm_provider
 import subprocess
 import sys
 from pathlib import Path
@@ -51,8 +51,11 @@ def main() -> None:
     ap.add_argument("--find-emails", action="store_true", help="Enrich qualified leads with Prospeo")
     ap.add_argument("--min-fit", type=int, choices=range(1, 6), default=4)
     ap.add_argument("--max-lookups", type=int, default=100)
+    ap.add_argument("--draft", action="store_true",
+                    help="Draft connection note + DM per qualified row using playbooks/copy-templates.md")
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
     ap.add_argument("--campaign-id", type=int, help="Generate a Smartlead import preview")
+    ap.add_argument("--heyreach-list-id", type=int, help="Generate a HeyReach list push preview (LinkedIn outreach)")
     ap.add_argument("--resolve-batch", type=int, default=0, metavar="N",
                     help="ids per profile-scraper run for resolve (0 = one run; Apify free plan allows 10)")
     ap.add_argument("--no-resolve", action="store_true",
@@ -79,11 +82,12 @@ def main() -> None:
         ap.error("Invalid scrape or lookup limits")
     if args.campaign_id is not None and (args.campaign_id < 1 or not args.find_emails):
         ap.error("--campaign-id must be positive and requires --find-emails")
-    required = [] if args.scores else ['OPENAI_API_KEY']
+    required = []
+    if not args.scores and not llm_provider():
+        sys.exit('No LLM for scoring: pass --scores (judgments made in-session), set OPENAI_API_KEY in .env, '
+                 'or install the `claude` CLI and log in to your Claude subscription (LLM_PROVIDER=claude).')
     if not (args.skip_harvest and args.no_resolve) and not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
         required.append('APIFY_TOKEN')
-    if args.domain:
-        required.append('FIRECRAWL_API_KEY')
     if args.find_emails:
         required.append('PROSPEO_API_KEY')
     if args.supabase:
@@ -158,6 +162,9 @@ def main() -> None:
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
     final_csv = out_csv
+    if args.draft:
+        run_step("Draft outreach copy", [py, "src/draft.py", "--slug", slug, "--output-dir", out,
+                 "--min-fit", str(max(3, args.min_fit))])
     if not args.no_resolve:
         final_csv = out_csv.with_name("resolved.csv")
         run_step("Resolve opaque profile IDs", [py, "src/resolve.py", "--input", str(out_csv),
@@ -178,6 +185,9 @@ def main() -> None:
     if args.campaign_id:
         run_step("Smartlead preview", [py, "src/push.py", "--input", str(final_csv),
                  "--campaign-id", str(args.campaign_id), "--min-fit", str(args.min_fit)])
+    if args.heyreach_list_id:
+        run_step("HeyReach preview", [py, "src/push_heyreach.py", "--input", str(final_csv),
+                 "--list-id", str(args.heyreach_list_id), "--min-fit", str(args.min_fit)])
     run_step("Summary", [py, "src/summary.py", "--input", str(final_csv), "--min-fit", str(args.min_fit)])
     print(f"\n{'='*60}")
     print("PIPELINE COMPLETE")

@@ -1,7 +1,7 @@
 """Derive or load recipient ICP. Two mutually-exclusive modes:
 
   --domain <domain>   Auto mode: scrape the domain via Spider/Firecrawl and use
-                      gpt-4.1-mini to infer who the company sells to.
+                      the configured LLM to infer who the company sells to.
   --icp <path.yaml>   Manual mode: load a user-written icp.yaml and write the
                       same recipient_icp.json shape, skipping the scrape.
 
@@ -16,12 +16,14 @@ from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from .common import llm_json
+except ImportError:
+    from common import llm_json
 
 load_dotenv()
 
 FIRECRAWL_API_KEY = os.environ.get("FIRECRAWL_API_KEY")
-MODEL = "gpt-4.1-mini"
 
 SYSTEM = (
     "You are a B2B go-to-market analyst. Given marketing copy scraped from a "
@@ -87,10 +89,38 @@ def _firecrawl_scrape(fc, url: str, js: bool = False) -> str:
     return (getattr(doc, "markdown", None) or "").strip()
 
 
+def _plain_scrape(url: str) -> str:
+    """No-key fallback: fetch the page and strip tags with the stdlib parser."""
+    import requests
+    from html.parser import HTMLParser
+
+    class _Text(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.parts = []; self.skip = 0
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "noscript", "svg"):
+                self.skip += 1
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "noscript", "svg") and self.skip:
+                self.skip -= 1
+        def handle_data(self, data):
+            if not self.skip and data.strip():
+                self.parts.append(data.strip())
+    try:
+        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 (icp-intake)"})
+        r.raise_for_status()
+    except Exception:
+        return ""
+    p = _Text(); p.feed(r.text)
+    return "\n".join(p.parts)
+
+
 def _scrape_one(url: str, fc) -> str:
     text = _spider_scrape(url)
     if len(text) >= 200:
         return text
+    if fc is None:
+        return _plain_scrape(url)
     text = _firecrawl_scrape(fc, url, js=False)
     if len(text) >= 200:
         return text
@@ -99,7 +129,7 @@ def _scrape_one(url: str, fc) -> str:
 
 def gather_text(domain: str) -> tuple[str, list[str]]:
     base = f"https://{domain}" if not domain.startswith("http") else domain
-    fc = _firecrawl_client()
+    fc = _firecrawl_client() if FIRECRAWL_API_KEY else None  # no key: plain HTTP fallback
 
     chunks: list[str] = []
     sources: list[str] = []
@@ -123,7 +153,6 @@ def gather_text(domain: str) -> tuple[str, list[str]]:
 
 
 def derive_from_domain(domain: str, slug: str, out_dir: Path) -> None:
-    client = OpenAI()  # reads OPENAI_API_KEY from env
     print(f"Scraping {domain} ...")
     text, sources = gather_text(domain)
     if not text:
@@ -136,18 +165,7 @@ def derive_from_domain(domain: str, slug: str, out_dir: Path) -> None:
         f"Scraped marketing copy:\n{text}\n\n"
         "Infer who this company SELLS TO and return the strict JSON."
     )
-    resp = client.chat.completions.create(
-        model=MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user},
-        ],
-    )
-    raw = json.loads(resp.choices[0].message.content)
-    u = resp.usage
-    in_tok, out_tok = u.prompt_tokens, u.completion_tokens
+    raw, in_tok, out_tok = llm_json(SYSTEM, user)
 
     icp = {
         "domain": domain,
@@ -163,14 +181,13 @@ def derive_from_domain(domain: str, slug: str, out_dir: Path) -> None:
     out_path = out_dir / "recipient_icp.json"
     out_path.write_text(json.dumps(icp, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    cost = in_tok / 1_000_000 * 0.40 + out_tok / 1_000_000 * 1.60
     print("=== DERIVED ICP ===")
     print(f"  summary    : {icp['summary']}")
     print(f"  titles     : {', '.join(icp['titles'])}")
     print(f"  size_range : {icp['size_range']}")
     print(f"  industries : {', '.join(icp['industries'])}")
     print(f"  geos       : {', '.join(icp['geos'])}")
-    print(f"  tokens in/out: {in_tok}/{out_tok}  approx cost: ${cost:.4f}")
+    print(f"  tokens in/out: {in_tok}/{out_tok}")
     print(f"  -> {out_path}")
 
 
@@ -190,6 +207,7 @@ def derive_from_yaml(icp_path: str, slug: str, out_dir: Path) -> None:
         "buying_triggers": raw.get("buying_triggers") or raw.get("triggers") or [],
         "industries": raw.get("industries") or [],
         "geos": raw.get("geos") or [],
+        "best_customers": raw.get("best_customers") or [],
         "summary": raw.get("summary") or "",
         "sources": [str(path)],
     }

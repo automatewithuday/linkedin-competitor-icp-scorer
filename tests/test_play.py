@@ -201,17 +201,13 @@ class HTTPTests(unittest.TestCase):
 
 class ScoringTests(unittest.TestCase):
     def client(self, results):
-        client = Mock()
-        client.chat.completions.create.return_value = SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({'results': results})))],
-            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
-        return client
+        return patch.object(rank, 'llm_json', return_value=({'results': results}, 1, 1))
 
     def test_bad_model_alignment_rejected(self):
         for results in [[], [{'i': 1, 'icp_fit': 4}], [{'i': 0, 'icp_fit': 4}] * 2,
                         [{'i': 0, 'icp_fit': 6}], [{'i': 0, 'icp_fit': 4, 'intent': 'urgent'}]]:
-            with self.assertRaises(ValueError):
-                rank.score_batch(self.client(results), 'ICP', [{}])
+            with self.client(results), self.assertRaises(ValueError):
+                rank.score_batch('ICP', [{}])
 
     def test_reactions_do_not_claim_buying_intent(self):
         self.assertEqual(rank.reaction_intent(['INTEREST', 'PRAISE']), 'low')
@@ -405,3 +401,66 @@ class OpaqueIdTests(unittest.TestCase):
                 resolve.main()
             self.assertFalse(Path(output).exists())
         scrape.assert_not_called()
+
+
+class LlmProviderTests(unittest.TestCase):
+    def test_provider_selection(self):
+        with patch.dict('os.environ', {'LLM_PROVIDER': '', 'OPENAI_API_KEY': 'k'}):
+            self.assertEqual(common.llm_provider(), 'openai')
+        with patch.dict('os.environ', {'LLM_PROVIDER': 'claude', 'OPENAI_API_KEY': 'k'}):
+            self.assertEqual(common.llm_provider(), 'claude')
+        with patch.dict('os.environ', {'LLM_PROVIDER': '', 'OPENAI_API_KEY': ''}), \
+                patch('shutil.which', return_value=None):
+            self.assertIsNone(common.llm_provider())
+            with self.assertRaises(RuntimeError):
+                common.llm_json('s', 'u')
+
+
+class DraftTests(unittest.TestCase):
+    def test_template_mapping_is_strict(self):
+        from src import draft
+        self.assertIsNone(draft.pick_template(2, 'high', 'we need this badly'))
+        self.assertEqual(draft.pick_template(3, 'high', 'anything'), 'Integration-Partner')
+        self.assertEqual(draft.pick_template(5, 'high', 'Great post!'), 'Pain-Pivot')
+        self.assertEqual(draft.pick_template(4, 'medium', ''), 'Pain-Pivot')
+        self.assertEqual(draft.pick_template(4, 'high', 'Half the list is enrichment. None solve decay.'), 'Assumed-Knowledge')
+
+    def test_topic_falls_back_to_url_slug(self):
+        from src import draft
+        posts = {'1': {'content': '', 'url': 'https://www.linkedin.com/posts/x_28-apis-that-turn-any-agent-into-a-gtm-engine-activity-7505-X4vU'}}
+        self.assertEqual(draft.post_topic(['1'], posts), '28 apis that turn any agent into a gtm engine')
+
+
+class HeyReachTests(unittest.TestCase):
+    def rows(self):
+        return [{'name': 'Ann Lee', 'linkedin_url': 'https://www.linkedin.com/in/ann', 'icp_fit': '4', 'clean_title': 'CMO',
+                 'company_guess': 'Acme', 'intent': 'high', 'email': 'a@x.io', 'email_status': 'VERIFIED'},
+                {'name': 'Dup', 'linkedin_url': 'https://www.linkedin.com/in/ann/', 'icp_fit': '5'},
+                {'name': 'Low', 'linkedin_url': 'https://www.linkedin.com/in/low', 'icp_fit': '2'},
+                {'name': 'NoUrl', 'linkedin_url': '', 'icp_fit': '5'},
+                {'name': 'Urn Id', 'linkedin_url': 'https://www.linkedin.com/in/ACoAAC2AeykBzJtlA4f9aIQymmFs7b3UoQ7B20M', 'icp_fit': '4'}]
+
+    def test_select_merges_drafts(self):
+        from src import push_heyreach
+        drafts = {'https://www.linkedin.com/in/ann': {'template': 'Pain-Pivot', 'connection_note': 'hi', 'dm': 'yo'}}
+        leads, excluded = push_heyreach.select_leads(self.rows(), 4, drafts)
+        self.assertEqual((len(leads), excluded), (2, 3))
+        self.assertEqual(leads[0]['emailAddress'], 'a@x.io')
+        names = {f['name']: f['value'] for f in leads[0]['customUserFields']}
+        self.assertEqual(names['dm'], 'yo')
+        self.assertEqual(names['icp_fit'], '4')
+
+    @patch('src.push_heyreach.post_json')
+    def test_push_confirms_counts_and_batches(self, post):
+        from src import push_heyreach
+        post.return_value = {'addedLeadsCount': 100, 'updatedLeadsCount': 0, 'failedLeadsCount': 0}
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'r.json'
+            ok = [{'profileUrl': f'https://www.linkedin.com/in/u{i}'} for i in range(100)]
+            receipt = push_heyreach.push_batches(ok, {'listId': 7}, 'k', path)
+            self.assertTrue(receipt['complete'])
+            self.assertEqual(post.call_args.kwargs['json']['listId'], 7)
+            post.return_value = {'addedLeadsCount': 1}
+            with self.assertRaises(RuntimeError):
+                push_heyreach.push_batches(ok[:2], {'campaignId': 1, 'linkedInAccountId': 2}, 'k', path)
+            self.assertEqual(json.loads(path.read_text())['batches'][0]['status'], 'unconfirmed')
