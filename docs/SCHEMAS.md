@@ -127,8 +127,13 @@ Exact per-item pricing varies; measure on first run via `usageTotalUsd` in the r
 | Field | Range | Description |
 |-------|-------|-------------|
 | `icp_fit` | 1-5 | Semantic match of position headline vs. ICP titles/industries |
+| `qualification_threshold`, `qualification_status` | 1-5; qualified/rejected | Required fit score and whether this person meets it |
+| `qualification_reason` | text, required | Evidence supporting the fit score, ICP mismatches and important missing facts; required for accepted and rejected people |
 | `intent` | high/medium/low | Derived from comment text; reaction weight if no comment |
+| `intent_reason` | text, required | Comment supporting intent, or the limitation of reaction-only engagement |
 | `rank_score` | float | `icp_fit * (1 + ln(engagement_count)) * intent_weight` |
+
+Both reason fields are required in automatic scorer responses and in-session `scores.json` entries. The ledger migrates existing score tables to store them; reasonless scores require a new judgment. The gate adds `eligibility_reason` for suppression, campaign history and score freshness. The optional Activity Intel stage adds `activity_reason` (also `outreach_reason` for compatibility), `activity_model`, status, probability and evidence link. Its default model is Jev (`jev-latest`) through TypeSafe. Skipped checks are `not_checked`; failed judgments are `unknown`, with reasons rather than an inactivity claim.
 
 **Intent weights:** `high=1.0`, `medium=0.6`, `low=0.3`
 
