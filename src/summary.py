@@ -3,9 +3,9 @@ import argparse
 from collections import Counter
 
 try:
-    from .common import fit, linkedin_url, read_csv
+    from .common import qualification_ok, fit, linkedin_url, read_csv
 except ImportError:
-    from common import fit, linkedin_url, read_csv
+    from common import qualification_ok, fit, linkedin_url, read_csv
 
 
 def summarize(rows, top=20, min_fit=4):
@@ -18,7 +18,9 @@ def summarize(rows, top=20, min_fit=4):
     if 'icp_fit' in cols:
         dist = Counter(fit(r) for r in rows)
         lines.append("ICP fit: " + ", ".join(f"{k}={dist[k]}" for k in sorted(dist, reverse=True)))
-        qual = [r for r in rows if fit(r) >= min_fit]
+        qual = [r for r in rows if qualification_ok(r, min_fit)]
+        if 'qualification_status' in cols:
+            lines.append('ICP decisions: ' + str(dict(Counter(r['qualification_status'] for r in rows))))
         public = sum(bool(linkedin_url(r.get('linkedin_url'))) for r in qual)
         lines.append(f"Qualified (fit>={min_fit}): {len(qual)}; with public profile URL: {public}; "
                      f"high-intent comments: {sum(r.get('intent') == 'high' for r in rows)}")
@@ -28,7 +30,7 @@ def summarize(rows, top=20, min_fit=4):
     if any(r.get('getleads_status') for r in rows):
         lines.append('GetLeads ICP evidence: ' + str(dict(Counter(r.get('getleads_status') or 'not_checked' for r in rows))))
     if 'ledger_status' in cols:
-        lines.append(f"Ledger gate (eligible for activity, drafts, emails, pushes): "
+        lines.append(f"Ledger gate (ICP decision and channel checks also apply): "
                      f"{dict(Counter(r['ledger_status'].split(':')[0] for r in rows))}")
     if 'activity_status' in cols:
         checked = [r for r in rows if not r.get('activity_miss_reason')]
@@ -43,7 +45,7 @@ def summarize(rows, top=20, min_fit=4):
     if 'rank' in cols:  # rank.py order: qualified first, then rank_score
         ranked = sorted(rows, key=lambda r: int(r.get('rank') or 10**9))
     elif 'rank_score' in cols:
-        ranked = sorted(rows, key=lambda r: (fit(r) >= min_fit, float(r.get('rank_score') or 0)), reverse=True)
+        ranked = sorted(rows, key=lambda r: (qualification_ok(r, min_fit), float(r.get('rank_score') or 0)), reverse=True)
     else:
         ranked = rows
     if 'icp_fit' in cols and 'intent' in cols:
@@ -70,13 +72,13 @@ def summarize(rows, top=20, min_fit=4):
             line += f" {(r.get('email_status') or '')[:11]:<11}"
         lines.append(line)
         if r.get('qualification_reason'):
-            lines.append(f"    ICP ({r.get('qualification_status') or ('qualified' if fit(r) >= min_fit else 'rejected')}): {r['qualification_reason']}")
+            lines.append(f"    ICP ({r.get('qualification_status') or ('qualified' if qualification_ok(r, min_fit) else 'not_qualified')}): {r['qualification_reason']}")
         if r.get('activity_reason'):
             lines.append(f"    Activity: {r['activity_reason']}")
         if r.get('ledger_status') and r['ledger_status'] != 'eligible' and r.get('eligibility_reason'):
             lines.append(f"    Eligibility: {r['eligibility_reason']}")
-    if 'icp_fit' in cols and len(qual) > len([r for r in show if fit(r) >= min_fit]):
-        rest = [r for r in ranked[top:] if fit(r) >= min_fit]
+    if 'icp_fit' in cols and len(qual) > len([r for r in show if qualification_ok(r, min_fit)]):
+        rest = [r for r in ranked[top:] if qualification_ok(r, min_fit)]
         lines.append(f"\n{len(rest)} more qualified not shown: " + ", ".join((r.get('name') or '?') for r in rest))
     return lines
 

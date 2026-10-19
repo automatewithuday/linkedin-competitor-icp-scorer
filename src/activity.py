@@ -9,10 +9,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
+    from .common import qualification_ok, atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from .activity_intel import username
 except ImportError:
-    from common import atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
+    from common import qualification_ok, atomic_text, fit, ledger_ok, linkedin_url, read_csv, write_csv
     from activity_intel import username
 
 FIELDS = ['linkedin_outreach_ready', 'outreach_ready_probability', 'outreach_reason', 'activity_reason', 'activity_model', 'activity_status',
@@ -25,6 +25,8 @@ def eligible(row, min_fit):
     """-> (normalized public URL or '', miss reason or '')."""
     if fit(row) < min_fit:
         return '', 'below_min_fit'
+    if not qualification_ok(row, min_fit):
+        return '', 'qualification_hold'
     if not ledger_ok(row):
         return '', 'ledger_' + row['ledger_status'].split(':')[0]
     url = linkedin_url(row.get('linkedin_url'))
@@ -34,6 +36,8 @@ def eligible(row, min_fit):
 def miss_reason(why, row, min_fit):
     if why == 'below_min_fit':
         return f'Activity not checked: ICP fit {fit(row)} is below the required {min_fit}; review the qualification reason.'
+    if why == 'qualification_hold':
+        return 'Activity not checked: ICP decision is ' + row.get('qualification_status', 'needs_review') + '; resolve the qualification reason first.'
     if why.startswith('ledger_'):
         return 'Activity not checked: ' + (row.get('eligibility_reason') or f'ledger blocked outreach ({row.get("ledger_status")}).')
     if why == 'no_public_url':

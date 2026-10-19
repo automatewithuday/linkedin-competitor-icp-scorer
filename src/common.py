@@ -180,3 +180,9 @@ def ledger_ok(row):
     """False when the ledger gate marked this row suppressed, already in a campaign, or scored on stale evidence.
     Rows from CSVs that never went through the gate count as eligible."""
     return (row.get('ledger_status') or 'eligible') == 'eligible'
+
+
+def qualification_ok(row, min_fit=4):
+    """Explicit review/rejection holds cannot be bypassed by lowering a numeric threshold."""
+    return (fit(row) >= min_fit and str(row.get('needs_review', '')).lower() not in ('true', '1') and
+            (row.get('qualification_status') or 'qualified') == 'qualified')

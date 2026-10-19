@@ -42,7 +42,7 @@ STATUS_PRIORITY = {'failed': 0, 'unconfirmed': 1, 'needs_reconciliation': 2,
                    'imported': 3, 'contacted': 4, 'replied': 5, 'excluded': 6}
 SCORE_COLUMNS = ['contact_id', 'icp_id', 'icp_fit', 'intent', 'evidence_comment', 'clean_title',
                  'company_guess', 'evidence_hash', 'rubric_hash', 'scorer', 'slug', 'scored_at',
-                 'qualification_reason', 'intent_reason']
+                 'qualification_reason', 'intent_reason', 'needs_review']
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT, evidence_hash TEXT,
@@ -84,6 +84,10 @@ def connect(path=None):
         for column in ('qualification_reason', 'intent_reason'):
             if column not in columns:
                 con.execute(f"ALTER TABLE scores ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        if 'needs_review' not in columns:
+            con.execute('ALTER TABLE scores ADD COLUMN needs_review INTEGER')
+        if 'profile_json' not in {r['name'] for r in con.execute('PRAGMA table_info(profile_snapshots)')}:
+            con.execute("ALTER TABLE profile_snapshots ADD COLUMN profile_json TEXT NOT NULL DEFAULT '{}'")
         if 'enrichment_json' not in {r['name'] for r in con.execute('PRAGMA table_info(profile_snapshots)')}:
             con.execute("ALTER TABLE profile_snapshots ADD COLUMN enrichment_json TEXT NOT NULL DEFAULT '{}'")
     return con
@@ -103,6 +107,8 @@ def evidence_hash(e):
     enrichment = {k: v for k, v in (e.get('icp_enrichment') or {}).items() if k != 'checked_at'}
     if enrichment:
         evidence['icp_enrichment'] = enrichment
+    if e.get('profile_evidence'):
+        evidence['profile_evidence'] = e['profile_evidence']
     return digest(evidence)
 
 
@@ -123,7 +129,7 @@ def score_context(e, icp, system):
 
 def score_hash(score):
     return digest({k: score[k] for k in ('icp_fit', 'intent', 'evidence_comment', 'clean_title', 'company_guess',
-                                       'qualification_reason', 'intent_reason')})
+                                       'qualification_reason', 'intent_reason', 'needs_review')})
 
 
 def has_reasons(score):
@@ -202,13 +208,14 @@ def contact_for(con, aliases, name=None, slug=None):
 def snapshot(con, cid, e, source):
     ev = {'headline': e.get('position') or '', 'location': e.get('location') or '', 'company': e.get('company') or ''}
     enrichment = e.get('icp_enrichment') or {}
-    if not any(ev.values()) and not enrichment:
+    profile = e.get('profile_evidence') or {}
+    if not any(ev.values()) and not enrichment and not profile:
         return
-    h = digest(ev | {'icp_enrichment': enrichment})
+    h = digest(ev | {'icp_enrichment': enrichment, 'profile_evidence': profile})
     last = con.execute('SELECT hash FROM profile_snapshots WHERE contact_id=? ORDER BY id DESC LIMIT 1', (cid,)).fetchone()
     if not last or last[0] != h:
-        con.execute('INSERT INTO profile_snapshots (contact_id, headline, location, company, source, hash, taken_at, enrichment_json) '
-                    'VALUES (?,?,?,?,?,?,?,?)', (cid, *ev.values(), source, h, now(), json.dumps(enrichment)))
+        con.execute('INSERT INTO profile_snapshots (contact_id, headline, location, company, source, hash, taken_at, enrichment_json, profile_json) '
+                    'VALUES (?,?,?,?,?,?,?,?,?)', (cid, *ev.values(), source, h, now(), json.dumps(enrichment), json.dumps(profile)))
 
 
 def touch_evidence(con, cid, e):
@@ -226,6 +233,10 @@ def profile_state(con, cid):
                       "AND enrichment_json != '{}' ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     if row:
         state['icp_enrichment'] = json.loads(row[0])
+    row = con.execute("SELECT profile_json FROM profile_snapshots WHERE contact_id=? "
+                      "AND profile_json != '{}' AND company=? ORDER BY id DESC LIMIT 1", (cid, state.get('company', ''))).fetchone()
+    if row:
+        state['profile_evidence'] = json.loads(row[0])
     return state
 
 
@@ -241,7 +252,10 @@ def ingest(con, base):
             continue
         new += created
         seen += (not created) and con.execute('SELECT first_slug FROM contacts WHERE id=?', (cid,)).fetchone()[0] != slug
-        for key, value in profile_state(con, cid).items():
+        state = profile_state(con, cid)
+        for key, value in state.items():
+            if key == 'profile_evidence' and e.get('company') and e['company'] != state.get('company'):
+                continue  # A newly observed employer must not inherit the previous employer's roles.
             e[key] = e.get(key) or value
         if (e.get('id') or '').startswith('ACoAA') and not linkedin_url(e.get('linkedinUrl')):
             cached = cached_lookup(con, e['id'])
@@ -277,7 +291,7 @@ def cached_lookup(con, opaque_id):
     if row['status'] == 'resolved':
         cid = find_contact(con, ['id:' + opaque_id])
         state = profile_state(con, cid) if cid else {}
-        out |= {key: state.get(key, '') for key in ('location', 'company')}
+        out |= {key: state.get(key, '') for key in ('location', 'company', 'profile_evidence')}
     return out
 
 
@@ -308,7 +322,7 @@ def record_scores(con, engagers, results, icp, system, scorer, slug):
         con.execute(f'INSERT OR REPLACE INTO scores ({",".join(SCORE_COLUMNS)}) VALUES ({",".join("?" * len(SCORE_COLUMNS))})',
                     (cid, icp_id, r.get('icp_fit'), r.get('intent'), r.get('evidence_comment'), r.get('clean_title'),
                      r.get('company_guess'), evidence_hash(e), rh, scorer, slug, now(),
-                     r.get('qualification_reason') or '', r.get('intent_reason') or ''))
+                     r.get('qualification_reason') or '', r.get('intent_reason') or '', int(r.get('needs_review', False))))
     con.commit()
 
 
@@ -321,11 +335,11 @@ def fresh_scores(con, engagers, icp, system):
     for i, e in enumerate(engagers):
         cid = find_contact(con, aliases_of(e))
         s = cid and con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?', (cid, icp_id)).fetchone()
-        if s and s['evidence_hash'] == evidence_hash(e) and s['rubric_hash'] == rh and has_reasons(s):
+        if s and s['evidence_hash'] == evidence_hash(e) and s['rubric_hash'] == rh and has_reasons(s) and s['needs_review'] is not None:
             out[i] = {'i': i, 'icp_fit': s['icp_fit'], 'intent': s['intent'], 'evidence_comment': s['evidence_comment'],
                       'clean_title': s['clean_title'], 'company_guess': s['company_guess'],
                       'qualification_reason': s['qualification_reason'], 'intent_reason': s['intent_reason'],
-                      'score_context': score_context(e, icp, system)}
+                      'needs_review': bool(s['needs_review']), 'score_context': score_context(e, icp, system)}
     return out
 
 
@@ -370,8 +384,10 @@ def status_for(con, aliases, icp_id=None, rh=None, ev=None, email=None):
             s = con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?',
                             (cid, icp_id)).fetchone()
             current = con.execute('SELECT evidence_hash FROM contacts WHERE id=?', (cid,)).fetchone()[0]
-            if not s or s['evidence_hash'] != ev or s['rubric_hash'] != rh or current != ev or not has_reasons(s):
+            if not s or s['evidence_hash'] != ev or s['rubric_hash'] != rh or current != ev or not has_reasons(s) or s['needs_review'] is None:
                 return 'stale_score'
+            if s['needs_review']:
+                return 'needs_review'
     elif icp_id is not None:
         return 'stale_score'
     return 'eligible'
@@ -401,6 +417,8 @@ def gate(con, base):
 def eligibility_reason(status):
     if status == 'eligible':
         return 'Ledger checks passed: current score and no recorded suppression or campaign block. ICP fit and channel suitability still apply.'
+    if status == 'needs_review':
+        return 'Hold outreach: required ICP evidence is missing or conflicting; review the qualification reason and rescore after resolving it.'
     if status == 'stale_score':
         return 'Hold outreach: score or explanation is missing or does not match the current evidence, ICP or rubric; rescore first.'
     kind, _, detail = status.partition(':')

@@ -27,8 +27,8 @@ class GetLeadsTests(unittest.TestCase):
         self.addCleanup(self.con.close)
 
     def person(self, n=1, **changes):
-        return {'id': f'ACoAA{n}', 'name': f'Person {n}', 'position': 'VP Sales at Acme',
-                'company': 'Acme', 'location': 'United States',
+        return {'id': f'ACoAA{n}', 'name': f'Person {n}', 'position': 'VP Sales at Acme Corp',
+                'company': 'Acme Corp', 'location': 'United States',
                 'linkedinUrl': f'https://www.linkedin.com/in/person{n}', **changes}
 
     def seed(self, slug='run', people=None, recipient=None, fits=None):
@@ -45,7 +45,7 @@ class GetLeadsTests(unittest.TestCase):
         return base
 
     def data(self, **changes):
-        return {'current_title': 'VP Sales', 'current_company_name': 'Acme',
+        return {'current_title': 'VP Sales', 'current_company_name': 'Acme Corp',
                 'current_company_industry': 'Software Development', 'employee_count_range': '51 to 200',
                 'current_company_website': 'acme.example', 'contact_country': 'United States',
                 'work_email': 'discard@acme.example', 'cellphone': 'discard-phone', **changes}
@@ -62,7 +62,7 @@ class GetLeadsTests(unittest.TestCase):
         scores = base / 'scores.json'
         common.write_json(scores, {'results': [
             {'i': i, 'icp_fit': fit, 'intent': None, 'clean_title': 'VP Sales',
-             'qualification_reason': 'Sales buyer evidence assessed; unknown criteria require review.',
+             'needs_review': False, 'qualification_reason': 'Sales buyer evidence assessed; unknown criteria require review.',
              'intent_reason': 'No comment intent.', 'score_context': ledger.score_context(e, recipient, rank.SYSTEM)}
             for i, e in enumerate(people)]})
         with patch('sys.argv', ['rank.py', '--slug', base.name, '--output-dir', str(self.root), '--scores', str(scores)]):
@@ -174,7 +174,7 @@ class GetLeadsTests(unittest.TestCase):
             self.assertEqual(req.call_count, 1)
         loaded = json.loads((second / 'engagers.json').read_text())
         self.assertEqual(loaded[0]['company'], 'New Employer')
-        self.assertEqual(loaded[0]['icp_enrichment']['company'], 'Acme')
+        self.assertEqual(loaded[0]['icp_enrichment']['company'], 'Acme Corp')
         self.assertEqual(loaded[1]['getleads_status'], 'not_found')
         self.assertIn('GetLeads database evidence', rank.engager_lines(loaded)[0])
         self.assertIn('conflicts', rank.SYSTEM)
@@ -211,7 +211,7 @@ class GetLeadsTests(unittest.TestCase):
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM enrichment_attempts').fetchone()[0], 1)
         loaded = json.loads((base / 'engagers.json').read_text())
         self.assertEqual(loaded[1]['getleads_status'], 'lookup_limit_reached')
-        self.assertEqual(loaded[2]['icp_enrichment']['company'], 'Acme')
+        self.assertEqual(loaded[2]['icp_enrichment']['company'], 'Acme Corp')
 
     def test_partial_failure_retains_paid_results_and_holds_unknown_retries(self):
         people = [self.person(), self.person(2)]
@@ -223,7 +223,7 @@ class GetLeadsTests(unittest.TestCase):
             self.assertEqual(self.invoke(base), ([], True))
         self.assertEqual(req.call_count, 2)
         loaded = json.loads((base / 'engagers.json').read_text())
-        self.assertEqual(loaded[0]['icp_enrichment']['company'], 'Acme')
+        self.assertEqual(loaded[0]['icp_enrichment']['company'], 'Acme Corp')
         with patch.object(getleads, 'allowance', return_value=(100, 'credits')), patch.object(getleads, 'enrich_batch', return_value={
                 people[1]['linkedinUrl']: ('not_found', {})}) as req:
             self.assertEqual(self.invoke(base, retry_unknown=True), ([], False))

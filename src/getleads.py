@@ -24,7 +24,7 @@ BATCH_SIZE = 25
 CACHE_DAYS = 30
 PROVIDER = 'getleads'
 FIELDS = ('title', 'company', 'company_domain', 'company_industry', 'company_size',
-          'company_description', 'person_location', 'person_country')
+          'company_description', 'person_location', 'person_country', 'company_linkedin_url', 'company_id')
 
 
 class ProviderError(RuntimeError):
@@ -90,6 +90,8 @@ def normalize(data):
         text_field(data, 'co_description'),
         text_field(data, 'current_location'),
         text_field(data, 'contact_country', 'location_country'),
+        text_field(data, 'current_company_linkedin_url', 'co_linkedin_url'),
+        text_field(data, 'current_company_id'),
     )))
     email = text_field(data, 'work_email')
     return facts | {'work_email': email if valid_email(email) else '', 'email_lookup_complete': True}
@@ -125,10 +127,16 @@ def enrich_batch(urls, key):
 
 
 def missing_evidence(e, icp):
-    enriched = e.get('icp_enrichment') or {}
+    try:
+        from .evidence import scoring_enrichment
+    except ImportError:
+        from evidence import scoring_enrichment
+    enriched, _ = scoring_enrichment(e)
+    roles = (e.get('profile_evidence') or {}).get('current_roles') or []
+    title = roles[0].get('title') if roles else ''
     missing = []
     for field, present in (
-        ('title', e.get('position') or enriched.get('title')),
+        ('title', title or e.get('position') or enriched.get('title')),
         ('company', e.get('company') or enriched.get('company')),
         ('location', not icp.get('geos') or e.get('location') or enriched.get('person_location') or enriched.get('person_country')),
         ('industry', not (icp.get('industries') or icp.get('industries_out')) or enriched.get('company_industry')),

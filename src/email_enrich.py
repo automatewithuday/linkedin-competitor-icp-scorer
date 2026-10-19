@@ -7,11 +7,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 try:
     from . import getleads, ledger
-    from .common import fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
+    from .common import qualification_ok, fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
 except ImportError:
     import getleads
     import ledger
-    from common import fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
+    from common import qualification_ok, fit, ledger_ok, linkedin_url, read_csv, valid_email, write_csv
 
 FIELDS = ['email', 'email_status', 'sendable', 'email_provider', 'email_checked_at', 'miss_reason']
 
@@ -35,6 +35,8 @@ def discover(rows, con, slug, base, min_fit=4, max_lookups=100, cache_days=30, d
         url = linkedin_url(row.get('linkedin_url'))
         if fit(row) < min_fit:
             row['miss_reason'] = 'below_min_fit'
+        elif not qualification_ok(row, min_fit):
+            row['miss_reason'] = 'qualification_hold'
         elif not ledger_ok(row):
             row['miss_reason'] = 'ledger_' + row['ledger_status'].split(':')[0]
         elif not url:

@@ -43,7 +43,7 @@ class LedgerFixTests(unittest.TestCase):
         es = json.loads((base / 'engagers.json').read_text())
         recipient = json.loads((base / 'recipient_icp.json').read_text())
         path = base / 'scores.json'
-        common.write_json(path, {'results': [{'qualification_reason': 'Role evidence assessed against the ICP.',
+        common.write_json(path, {'results': [{'needs_review': False, 'qualification_reason': 'Role evidence assessed against the ICP.',
                                                         'intent_reason': 'Intent assessed from supplied engagement evidence.', **r, 'score_context': ledger.score_context(es[r['i']], recipient, rank.SYSTEM)}
                                             for r in results]})
         return path

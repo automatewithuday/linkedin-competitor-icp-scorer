@@ -20,8 +20,10 @@ import requests
 from dotenv import load_dotenv
 try:
     from .common import location_text
+    from .evidence import profile_evidence
 except ImportError:
     from common import location_text
+    from evidence import profile_evidence
 
 load_dotenv()
 
@@ -92,8 +94,8 @@ def profile_fields(actor: dict) -> tuple:
     url = actor.get("linkedinUrl")
     if not is_vanity_url(url) and actor.get("publicIdentifier"):
         url = "https://www.linkedin.com/in/" + actor["publicIdentifier"]
-    jobs = actor.get("currentPosition") or actor.get("experience") or []
-    company = (jobs[0].get("companyName") or "") if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict) else ""
+    jobs = profile_evidence(actor).get("current_roles") or []
+    company = jobs[0].get("company", "") if jobs else ""
     return url, location_text(actor.get("location")), company
 
 
@@ -111,6 +113,7 @@ def build_engagers(items: list) -> list:
 
         cand, location, company = profile_fields(actor)
         position = actor.get("position") or actor.get("headline")
+        evidence = profile_evidence(actor)
         e = engagers.get(aid)
         if e is None:
             e = {
@@ -120,6 +123,7 @@ def build_engagers(items: list) -> list:
                 "position": position,
                 "location": location,
                 "company": company,
+                "profile_evidence": evidence,
                 "pictureUrl": actor.get("pictureUrl"),
                 "engagement_count": 0,
                 "posts_touched": set(),
@@ -135,6 +139,11 @@ def build_engagers(items: list) -> list:
         for k, v in (("position", position), ("location", location), ("company", company)):
             if not e.get(k) and v:
                 e[k] = v
+        if evidence and (not e.get("profile_evidence") or
+                         (evidence.get("current_roles") and not e["profile_evidence"].get("current_roles"))):
+            e["profile_evidence"] = evidence
+            if company:
+                e["company"] = company
         if not e.get("pictureUrl") and actor.get("pictureUrl"):
             e["pictureUrl"] = actor.get("pictureUrl")
 

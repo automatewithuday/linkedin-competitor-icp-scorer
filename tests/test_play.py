@@ -22,7 +22,7 @@ def verified_row(**changes):
 
 
 def explained(result):
-    return {'qualification_reason': 'The stated role and employer evidence were compared with the ICP.',
+    return {'needs_review': False, 'qualification_reason': 'The stated role and employer evidence were compared with the ICP.',
             'intent_reason': 'Intent reflects the supplied comment or reaction evidence.', **result}
 
 
