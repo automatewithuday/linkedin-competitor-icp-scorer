@@ -21,6 +21,15 @@ def verified_row(**changes):
     return row
 
 
+def bind_scores(base, path):
+    engagers = json.loads((base / 'engagers.json').read_text())
+    recipient = json.loads((base / 'recipient_icp.json').read_text())
+    data = json.loads(path.read_text())
+    for result in data['results']:
+        result['score_context'] = ledger.score_context(engagers[result['i']], recipient, rank.SYSTEM)
+    path.write_text(json.dumps(data))
+
+
 class IdentityTests(unittest.TestCase):
     def test_normalization(self):
         self.assertEqual(common.linkedin_url('https://uk.linkedin.com/in/Jane/?trk=x'),
@@ -304,6 +313,7 @@ class ScorerAndSummaryTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 5, 'intent': 'high', 'clean_title': 'CRO'},
                                                       {'i': 1, 'icp_fit': 1, 'intent': None}]}))
+            bind_scores(base, scores)
             with patch.dict('os.environ', {'OPENAI_API_KEY': ''}), \
                  patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
@@ -466,6 +476,7 @@ class LockedVersionTests(unittest.TestCase):
             (base / 'recipient_icp.json').write_text('{}')
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 2, 'intent': 'high'}, {'i': 1, 'icp_fit': 4, 'intent': None}]}))
+            bind_scores(base, scores)
             with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             rows, _ = common.read_csv(base / 'ranked_engagers.csv')
@@ -605,6 +616,7 @@ class ReviewFindingTests(unittest.TestCase):
             (base / 'engagers.json').write_text(json.dumps([e])); (base / 'recipient_icp.json').write_text('{}')
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': 'high', 'evidence_comment': 2}]}))
+            bind_scores(base, scores)
             with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
@@ -618,6 +630,7 @@ class ReviewFindingTests(unittest.TestCase):
             (base / 'engagers.json').write_text(json.dumps([e])); (base / 'recipient_icp.json').write_text('{}')
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': None, 'company_guess': None}]}))
+            bind_scores(base, scores)
             with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
@@ -702,6 +715,7 @@ class LedgerTests(unittest.TestCase):
         self.assertIn('1. New', out.getvalue()); self.assertNotIn('0. Seen', out.getvalue())
         scores = Path(self.tmp.name) / 'scores.json'
         scores.write_text(json.dumps({'results': [{'i': 1, 'icp_fit': 2, 'intent': None}]}))  # only the pending row
+        bind_scores(base, scores)
         with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--scores', str(scores)]):
             rank.main()
         rows = {r['name']: r['icp_fit'] for r in common.read_csv(base / 'ranked_engagers.csv')[0]}

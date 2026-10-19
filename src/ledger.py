@@ -28,14 +28,18 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
-    from .common import linkedin_url, read_csv, write_csv
+    from .common import linkedin_url, read_csv, write_csv, write_json
 except ImportError:
-    from common import linkedin_url, read_csv, write_csv
+    from common import linkedin_url, read_csv, write_csv, write_json
 
 DEFAULT_DB = 'data/ledger.sqlite'
-BLOCKING = ('imported', 'contacted', 'replied', 'excluded')  # campaign statuses that stop a repeat push
+BLOCKING = ('imported', 'contacted', 'replied', 'excluded', 'needs_reconciliation')
+EXPORT_FIELDS = ['ledger_icp_hash', 'ledger_evidence_hash', 'ledger_rubric_hash', 'ledger_score_hash']
+STATUS_PRIORITY = {'failed': 0, 'unconfirmed': 1, 'needs_reconciliation': 2,
+                   'imported': 3, 'contacted': 4, 'replied': 5, 'excluded': 6}
 
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS contacts (id INTEGER PRIMARY KEY, name TEXT, evidence_hash TEXT,
@@ -69,7 +73,7 @@ def connect(path=None):
 
 
 def now():
-    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
 
 def digest(obj):
@@ -86,7 +90,18 @@ def icp_hash(icp):
 
 
 def rubric_hash(system):
-    return digest(system)
+    # Invalidate pre-provenance scores, including judgments incorrectly certified by earlier retries.
+    return digest({'protocol': 2, 'system': system})
+
+
+def score_context(e, icp, system):
+    """Fingerprint copied from the dump into each submitted judgment; never inferred from the current file."""
+    identity = e.get('id') or linkedin_url(e.get('linkedinUrl')) or ''
+    return digest([identity, evidence_hash(e), icp_hash(icp), rubric_hash(system)])
+
+
+def score_hash(score):
+    return digest({k: score[k] for k in ('icp_fit', 'intent', 'evidence_comment', 'clean_title', 'company_guess')})
 
 
 def aliases_of(e=None, url=None, actor_id=None):
@@ -95,10 +110,17 @@ def aliases_of(e=None, url=None, actor_id=None):
     aid = actor_id or e.get('id') or e.get('actor_id')
     if aid and str(aid).startswith('ACoAA'):
         out.append('id:' + aid)
-    public = linkedin_url(url or e.get('linkedinUrl') or e.get('linkedin_url'))
+    raw = url or e.get('linkedinUrl') or e.get('linkedin_url') or ''
+    public = linkedin_url(raw)
     if public:
         out.append('url:' + public)
-    return out
+    elif raw:
+        parsed = urlsplit(raw if '://' in raw else 'https://' + raw)
+        parts = parsed.path.strip('/').split('/')
+        if (parsed.hostname == 'linkedin.com' or (parsed.hostname or '').endswith('.linkedin.com')) and \
+                len(parts) == 2 and parts[0] == 'in' and parts[1].startswith('ACoAA'):
+            out.append('id:' + parts[1])
+    return list(dict.fromkeys(out))
 
 
 def find_contact(con, aliases):
@@ -111,9 +133,21 @@ def find_contact(con, aliases):
 
 def merge(con, keep, drop):
     """Two records turned out to be one person (an id seen alone in one run, a URL alone in another)."""
-    for table in ('aliases', 'engagements', 'profile_snapshots', 'scores', 'campaign_contacts'):
+    for r in con.execute('SELECT * FROM campaign_contacts WHERE contact_id=?', (drop,)).fetchall():
+        save_campaign(con, keep, r['campaign'], r['status'], r['email'], r['receipt'], r['updated_at'])
+    con.execute('DELETE FROM campaign_contacts WHERE contact_id=?', (drop,))
+    for r in con.execute('SELECT * FROM scores WHERE contact_id=?', (drop,)).fetchall():
+        current = con.execute('SELECT scored_at FROM scores WHERE contact_id=? AND icp_id=?', (keep, r['icp_id'])).fetchone()
+        if not current or (r['scored_at'] or '') >= (current['scored_at'] or ''):
+            con.execute('INSERT OR REPLACE INTO scores VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', (keep, *list(r)[1:]))
+    con.execute('DELETE FROM scores WHERE contact_id=?', (drop,))
+    for table in ('aliases', 'engagements', 'profile_snapshots'):
         con.execute(f'UPDATE OR IGNORE {table} SET contact_id=? WHERE contact_id=?', (keep, drop))
         con.execute(f'DELETE FROM {table} WHERE contact_id=?', (drop,))
+    newer = con.execute('SELECT evidence_hash, updated_at FROM contacts WHERE id=?', (drop,)).fetchone()
+    current = con.execute('SELECT updated_at FROM contacts WHERE id=?', (keep,)).fetchone()
+    if (newer['updated_at'] or '') > (current['updated_at'] or ''):
+        con.execute('UPDATE contacts SET evidence_hash=?, updated_at=? WHERE id=?', (*newer, keep))
     con.execute('DELETE FROM contacts WHERE id=?', (drop,))
 
 
@@ -153,17 +187,35 @@ def touch_evidence(con, cid, e):
     con.execute('UPDATE contacts SET evidence_hash=?, updated_at=? WHERE id=?', (evidence_hash(e), now(), cid))
 
 
+def profile_state(con, cid):
+    """Missing harvest fields do not erase earlier evidence; latest nonblank value wins per field."""
+    state = {}
+    for field, column in (('position', 'headline'), ('location', 'location'), ('company', 'company')):
+        row = con.execute(f"SELECT {column} FROM profile_snapshots WHERE contact_id=? "
+                          f"AND {column} IS NOT NULL AND TRIM({column}) != '' ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+        state[field] = row[0] if row else ''
+    return state
+
+
 def ingest(con, base):
     """Harvest -> contacts, aliases, engagements, snapshots. Idempotent. -> (contacts, new, seen before)."""
     base = Path(base)
     slug = base.name
     new = seen = 0
-    for e in json.loads((base / 'engagers.json').read_text(encoding='utf-8')):
+    engagers = json.loads((base / 'engagers.json').read_text(encoding='utf-8'))
+    for e in engagers:
         cid, created = contact_for(con, aliases_of(e), e.get('name'), slug)
         if cid is None:
             continue
         new += created
         seen += (not created) and con.execute('SELECT first_slug FROM contacts WHERE id=?', (cid,)).fetchone()[0] != slug
+        for key, value in profile_state(con, cid).items():
+            e[key] = e.get(key) or value
+        if (e.get('id') or '').startswith('ACoAA') and not linkedin_url(e.get('linkedinUrl')):
+            cached = cached_lookup(con, e['id'])
+            if cached and cached['status'] == 'resolved' and cached['public_url']:
+                e['linkedinUrl'], e['resolve_status'] = cached['public_url'], 'resolved'
+                cid, _ = contact_for(con, aliases_of(e), e.get('name'), slug)
         snapshot(con, cid, e, 'harvest')
         touch_evidence(con, cid, e)
         if (e.get('id') or '').startswith('ACoAA') and e.get('resolve_status') in ('resolved', 'not_found'):
@@ -179,6 +231,7 @@ def ingest(con, base):
             con.execute('INSERT OR IGNORE INTO engagements VALUES (?,?,?,?,?,?,?)',
                         (cid, pid or '', 'comment', text, urls.get(pid), slug, now()))
     con.commit()
+    write_json(base / 'engagers.json', engagers)
     return new, seen
 
 
@@ -190,9 +243,9 @@ def cached_lookup(con, opaque_id):
         return None
     out = dict(row)
     if row['status'] == 'resolved':
-        snap = con.execute('SELECT s.* FROM profile_snapshots s JOIN aliases a ON a.contact_id=s.contact_id '
-                           'WHERE a.alias=? ORDER BY s.id DESC LIMIT 1', ('id:' + opaque_id,)).fetchone()
-        out |= {'location': snap['location'] if snap else '', 'company': snap['company'] if snap else ''}
+        cid = find_contact(con, ['id:' + opaque_id])
+        state = profile_state(con, cid) if cid else {}
+        out |= {key: state.get(key, '') for key in ('location', 'company')}
     return out
 
 
@@ -237,14 +290,27 @@ def fresh_scores(con, engagers, icp, system):
         s = cid and con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?', (cid, icp_id)).fetchone()
         if s and s['evidence_hash'] == evidence_hash(e) and s['rubric_hash'] == rh:
             out[i] = {'i': i, 'icp_fit': s['icp_fit'], 'intent': s['intent'], 'evidence_comment': s['evidence_comment'],
-                      'clean_title': s['clean_title'], 'company_guess': s['company_guess']}
+                      'clean_title': s['clean_title'], 'company_guess': s['company_guess'],
+                      'score_context': score_context(e, icp, system)}
     return out
+
+
+def pending_scores(con, base):
+    try:
+        from .rank import SYSTEM
+    except ImportError:
+        from rank import SYSTEM
+    base = Path(base)
+    engagers = json.loads((base / 'engagers.json').read_text(encoding='utf-8'))
+    icp = json.loads((base / 'recipient_icp.json').read_text(encoding='utf-8'))
+    reused = fresh_scores(con, engagers, icp, SYSTEM)
+    return [(i, e.get('name') or '?') for i, e in enumerate(engagers) if i not in reused]
 
 
 # ---------- eligibility ----------
 
 def suppression_for(con, aliases=(), email=None):
-    keys = [a for a in aliases if a.startswith('url:')]
+    keys = list(aliases)
     if email and '@' in email:
         keys += ['email:' + email.strip().lower(), 'domain:' + email.strip().lower().rsplit('@', 1)[1]]
     if not keys:
@@ -254,6 +320,7 @@ def suppression_for(con, aliases=(), email=None):
 
 
 def status_for(con, aliases, icp_id=None, rh=None, ev=None, email=None):
+    aliases = list(aliases) + (['email:' + email.strip().lower()] if email else [])
     cid = find_contact(con, aliases)
     all_aliases = list(aliases) + ([r[0] for r in con.execute('SELECT alias FROM aliases WHERE contact_id=?', (cid,))]
                                    if cid else [])
@@ -268,8 +335,11 @@ def status_for(con, aliases, icp_id=None, rh=None, ev=None, email=None):
         if icp_id is not None:
             s = con.execute('SELECT evidence_hash, rubric_hash FROM scores WHERE contact_id=? AND icp_id=?',
                             (cid, icp_id)).fetchone()
-            if not s or s['evidence_hash'] != ev or s['rubric_hash'] != rh:
+            current = con.execute('SELECT evidence_hash FROM contacts WHERE id=?', (cid,)).fetchone()[0]
+            if not s or s['evidence_hash'] != ev or s['rubric_hash'] != rh or current != ev:
                 return 'stale_score'
+    elif icp_id is not None:
+        return 'stale_score'
     return 'eligible'
 
 
@@ -286,29 +356,51 @@ def gate(con, base):
         e = engagers.get(r.get('actor_id')) or {}
         r['ledger_status'] = status_for(con, aliases_of(url=r.get('linkedin_url'), actor_id=r.get('actor_id')),
                                         icp_id, rh, evidence_hash(e) if e else None, r.get('email'))
-    write_csv(base / 'ranked_engagers.csv', rows, fields + ([] if 'ledger_status' in fields else ['ledger_status']))
+        cid = find_contact(con, aliases_of(e))
+        score = con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?', (cid, icp_id)).fetchone() if cid else None
+        r.update(dict(zip(EXPORT_FIELDS, [icp_hash(icp), evidence_hash(e), rh, score_hash(score) if score else ''])))
+    write_csv(base / 'ranked_engagers.csv', rows, fields + [k for k in ['ledger_status'] + EXPORT_FIELDS if k not in fields])
     return Counter(r['ledger_status'].split(':')[0] for r in rows)
 
 
-def record_campaign(con, leads, campaign, status, receipt=None):
+def save_campaign(con, cid, campaign, status, email=None, receipt=None, updated_at=None, resolve=False):
+    previous = con.execute('SELECT * FROM campaign_contacts WHERE contact_id=? AND campaign=?', (cid, campaign)).fetchone()
+    if previous:
+        # A later explicit failed result can resolve uncertainty, but cannot undo a confirmed import or reply.
+        if STATUS_PRIORITY.get(previous['status'], 0) > STATUS_PRIORITY.get(status, 0) and not (
+                resolve and status == 'failed' and previous['status'] in ('needs_reconciliation', 'unconfirmed')):
+            status = previous['status']
+        email = email or previous['email']
+        receipts = []
+        for value in (previous['receipt'], receipt):
+            if value:
+                try:
+                    parsed = json.loads(value)
+                except (ValueError, TypeError):
+                    parsed = value
+                receipts.extend(parsed if isinstance(parsed, list) else [value])
+        receipts = list(dict.fromkeys(receipts))
+        receipt = receipts[0] if len(receipts) == 1 else json.dumps(receipts) if receipts else None
+    con.execute('INSERT OR REPLACE INTO campaign_contacts VALUES (?,?,?,?,?,?)',
+                (cid, campaign, status, email, receipt, updated_at or now()))
+
+
+def record_campaign(con, leads, campaign, status, receipt=None, resolve=False):
     """leads: [(linkedin_url, email)] confirmed by the provider."""
+    recorded = 0
     for url, email in leads:
-        cid, _ = contact_for(con, aliases_of(url=url)) if linkedin_url(url) else (None, False)
-        if cid is None and email:  # email-only lead: suppress by email so it is still never pushed twice
-            con.execute('INSERT OR IGNORE INTO suppressions VALUES (?,?,?)',
-                        ('email:' + email.lower(), f'in_campaign:{campaign}', now()))
-            continue
+        aliases = aliases_of(url=url) + (['email:' + email.strip().lower()] if email else [])
+        cid, _ = contact_for(con, aliases)
         if cid is not None:
-            con.execute('INSERT INTO campaign_contacts VALUES (?,?,?,?,?,?) ON CONFLICT (contact_id, campaign) '
-                        'DO UPDATE SET status=excluded.status, email=COALESCE(excluded.email, email), '
-                        'receipt=excluded.receipt, updated_at=excluded.updated_at',
-                        (cid, campaign, status, email or None, receipt, now()))
+            save_campaign(con, cid, campaign, status, email, receipt, resolve=resolve)
+            recorded += 1
     con.commit()
+    return recorded
 
 
 def record_receipt(con, leads, receipt_path, campaign, url_key, email_key):
-    """Record every provider-confirmed batch of a push receipt as imported (unconfirmed batches as unconfirmed,
-    which does not block a retry: reconcile those in the provider first). Works for partial runs too."""
+    """All-success batches are imported; mixed aggregates need reconciliation; all-failed batches can retry.
+    Unconfirmed batches retain their existing retry policy. Returns the number actually recorded as imported."""
     try:
         receipt = json.loads(Path(receipt_path).read_text(encoding='utf-8'))
     except (OSError, ValueError):
@@ -316,9 +408,12 @@ def record_receipt(con, leads, receipt_path, campaign, url_key, email_key):
     n = 0
     for b in receipt.get('batches', []):
         batch = leads[b['offset']:b['offset'] + b['requested']]
-        status = 'imported' if b.get('status') == 'confirmed' else 'unconfirmed'
-        record_campaign(con, [(l.get(url_key), l.get(email_key)) for l in batch], campaign, status, str(receipt_path))
-        n += len(batch) if status == 'imported' else 0
+        status = 'unconfirmed'
+        if b.get('status') == 'confirmed':
+            failures = b.get('failedLeadsCount', b.get('skipped', 0))
+            status = ('failed' if b.get('failedLeadsCount') == len(batch) else 'needs_reconciliation') if failures else 'imported'
+        recorded = record_campaign(con, [(l.get(url_key), l.get(email_key)) for l in batch], campaign, status, str(receipt_path))
+        n += recorded if status == 'imported' else 0
     return n
 
 
@@ -326,6 +421,46 @@ def filter_blocked(con, leads, url_key, email_key):
     """-> (kept leads, number dropped) using suppressions and campaign history."""
     kept = [l for l in leads if not blocked(con, l.get(url_key), l.get(email_key))]
     return kept, len(leads) - len(kept)
+
+
+def filter_export_rows(con, rows, base=None):
+    """Revalidate CSV provenance and current evidence immediately before preview/import."""
+    try:
+        from .rank import SYSTEM
+    except ImportError:
+        from rank import SYSTEM
+    recipient = Path(base) / 'recipient_icp.json' if base else None
+    expected_icp = icp_hash(json.loads(recipient.read_text(encoding='utf-8'))) if recipient and recipient.exists() else None
+    kept = []
+    for row in rows:
+        aliases = aliases_of(row)
+        version = con.execute('SELECT id FROM icp_versions WHERE hash=?', (row.get('ledger_icp_hash'),)).fetchone()
+        if not version or not all(row.get(k) for k in EXPORT_FIELDS):
+            continue
+        if expected_icp is not None and row['ledger_icp_hash'] != expected_icp:
+            continue
+        status = status_for(con, aliases, version[0], rubric_hash(SYSTEM), row['ledger_evidence_hash'], row.get('email'))
+        cid = find_contact(con, aliases)
+        score = con.execute('SELECT * FROM scores WHERE contact_id=? AND icp_id=?', (cid, version[0])).fetchone() if cid else None
+        if status == 'eligible' and row['ledger_rubric_hash'] == rubric_hash(SYSTEM) and score and \
+                row['ledger_score_hash'] == score_hash(score) and str(row.get('icp_fit')) == str(score['icp_fit']):
+            kept.append(row)
+    return kept, len(rows) - len(kept)
+
+
+def export_validator(con, rows, url_key, email_key, base=None):
+    """Check original provenance for each batch without attaching internal metadata to provider payloads."""
+    def key(url, email):
+        aliases = aliases_of(url=url)
+        return tuple(aliases) if aliases else ('email:' + (email or '').strip().lower(),)
+    original = {}
+    for row in rows:
+        original.setdefault(key(row.get('linkedin_url'), row.get('email')), row)
+    def validate(batch):
+        selected = [original.get(key(lead.get(url_key), lead.get(email_key))) for lead in batch]
+        if any(row is None for row in selected) or filter_export_rows(con, selected, base)[1]:
+            raise RuntimeError('Lead eligibility changed before import; regenerate the ledger gate and preview before retrying')
+    return validate
 
 
 def blocked(con, url=None, email=None):
@@ -364,7 +499,7 @@ def main():
     p.add_argument('--reason', required=True)
     p = sub.add_parser('mark', help='record outreach status by hand (e.g. replied) for people in a CSV or one URL')
     p.add_argument('--campaign', required=True)
-    p.add_argument('--status', required=True, choices=['contacted', 'replied', 'excluded', 'imported'])
+    p.add_argument('--status', required=True, choices=['contacted', 'replied', 'excluded', 'imported', 'failed'])
     p.add_argument('--url'); p.add_argument('--csv')
     sub.add_parser('stats', help='counts, stale scores, campaign statuses')
     a = ap.parse_args()
@@ -377,8 +512,8 @@ def main():
         print(f'Ledger gate: {dict(c)}')
     elif a.cmd == 'suppress':
         keys = []
-        if a.url and linkedin_url(a.url):
-            keys.append('url:' + linkedin_url(a.url))
+        if a.url:
+            keys += aliases_of(url=a.url)
         keys += ['email:' + a.email.lower()] if a.email else []
         keys += ['domain:' + a.domain.lower().lstrip('@')] if a.domain else []
         for r in (read_csv(a.csv)[0] if a.csv else []):
@@ -390,7 +525,7 @@ def main():
     elif a.cmd == 'mark':
         rows = read_csv(a.csv)[0] if a.csv else [{'linkedin_url': a.url}]
         leads = [(r.get('linkedin_url'), r.get('email')) for r in rows]
-        record_campaign(con, leads, a.campaign, a.status)
+        record_campaign(con, leads, a.campaign, a.status, resolve=True)
         print(f'Marked {len(leads)} as {a.status} in {a.campaign}')
     else:
         print(json.dumps(stats(con), indent=1))

@@ -56,13 +56,15 @@ def select_leads(rows, min_fit=4, drafts=None):
     return leads, excluded
 
 
-def push_batches(leads, target, key, receipt_path):
+def push_batches(leads, target, key, receipt_path, before_batch=None):
     """target: {'listId': n} or {'campaignId': n, 'linkedInAccountId': n}."""
     receipt = {**target, 'requested': len(leads), 'batches': [], 'complete': False}
     write_json(receipt_path, receipt)
     headers = {'X-API-KEY': key}
     for start in range(0, len(leads), BATCH):
         batch = leads[start:start + BATCH]
+        if before_batch:
+            before_batch(batch)
         entry = {'offset': start, 'requested': len(batch), 'status': 'pending'}
         receipt['batches'].append(entry)
         write_json(receipt_path, receipt)
@@ -106,9 +108,9 @@ def main():
     if min(target.values()) <= 0:
         ap.error('IDs must be positive')
     rows, _ = read_csv(args.input)
+    con = ledger.connect()
+    rows, dropped = ledger.filter_export_rows(con, rows, Path(args.input).parent)
     leads, excluded = select_leads(rows, args.min_fit, load_drafts(args.input))
-    con = ledger.connect()  # suppressed people and anyone already imported to any campaign
-    leads, dropped = ledger.filter_blocked(con, leads, 'profileUrl', 'emailAddress')
     excluded += dropped
     campaign = f"heyreach:list:{args.list_id}" if args.list_id else f"heyreach:campaign:{args.campaign_id}"
     path = args.receipt or args.input + '.heyreach.json'
@@ -120,7 +122,8 @@ def main():
     if not key:
         ap.error('Set HEYREACH_API_KEY in .env')
     try:
-        receipt = push_batches(leads, target, key, path)
+        receipt = push_batches(leads, target, key, path,
+                              ledger.export_validator(con, rows, 'profileUrl', 'emailAddress', Path(args.input).parent))
     except RuntimeError as exc:
         ledger.record_receipt(con, leads, path, campaign, 'profileUrl', 'emailAddress')
         raise SystemExit(str(exc)) from None

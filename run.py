@@ -9,11 +9,11 @@ Scoring: pass --scores (judgments made in-session; see src/rank.py --dump), or l
 OPENAI_API_KEY, else the `claude` CLI when installed (LLM_PROVIDER forces one).
 """
 import argparse
-import json
 import os
 import re
 from dotenv import load_dotenv
 from src.common import in_session_guard, linkedin_url, llm_provider
+from src import ledger
 import subprocess
 import sys
 from pathlib import Path
@@ -172,20 +172,18 @@ def main() -> None:
     # candidates (fit >= min_fit - 1) so the final scoring can apply geo and employer rules.
     batch = ["--batch-size", str(args.resolve_batch)] if args.resolve_batch else []
     if not args.no_resolve:
-        rescore = Path(out) / slug / "rescore.json"
-        before = rescore.stat().st_mtime if rescore.exists() else None
         # The only profile fetch. A failed lookup exits non-zero and stops the run here, so no row reaches
         # activity/email/exports scored without its profile evidence; paid results are kept for the rerun.
         run_step("Profile lookups before final scoring", [py, "src/resolve.py", "--slug", slug, "--output-dir", out,
                  "--min-fit", str(max(1, args.min_fit - 1))] + batch + (["--scores", args.scores] if args.scores else []))
-        fresh = rescore.exists() and rescore.stat().st_mtime != before
-        if args.scores and rescore.exists() and rescore.stat().st_mtime > Path(args.scores).stat().st_mtime:
-            todo = json.loads(rescore.read_text(encoding="utf-8"))
-            sys.exit(f"\n{len(todo['indices'])} candidates gained location/company after scoring: "
-                     f"{', '.join(n or '?' for n in todo['names'])}.\n"
-                     f"Rescore engager indices {todo['indices']} with `uv run src/rank.py --dump --slug {slug}`, "
+        with ledger.connect() as con:
+            pending = ledger.pending_scores(con, Path(out) / slug)
+        if args.scores and pending:
+            sys.exit(f"\n{len(pending)} candidates need judgments for current profile evidence: "
+                     f"{', '.join(name for _, name in pending)}.\n"
+                     f"Rescore engager indices {[i for i, _ in pending]} with `uv run src/rank.py --dump --slug {slug}`, "
                      f"update {args.scores}, then rerun this command (already-resolved profiles are not paid again).")
-        if fresh and not args.scores:
+        if pending and not args.scores:
             run_step("Rescore with profile data", rank_cmd)
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"

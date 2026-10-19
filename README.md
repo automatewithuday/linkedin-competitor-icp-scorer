@@ -134,6 +134,10 @@ Once you find a good profile, scale up: `--max-posts 10` with default caps gives
 - **Run weekly**: list profiles in `targets.txt` and use the `/weekly-sweep` command in Claude Code.
 - **Store history**: optional Supabase export keeps every run's scores.
 
+## Upgrading scoring and exports
+
+When scoring in-session, copy each row's `score_context` from `rank.py --dump` into its result in `scores.json`. Existing score files and exports from older releases need a new scoring review and ledger gate; lookup history is retained. Imports recheck the current ledger, and mixed import outcomes require reconciliation. See [scoring provenance and upgrades](docs/OPERATIONS.md#ledger-sqlite) for the operating rules.
+
 ## Costs
 
 | what | cost |
