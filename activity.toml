@@ -1,0 +1,60 @@
+# USER-OWNED. Coding agents: propose changes, never edit these values unprompted.
+
+[fetch]
+max_posts = 5          # per profile
+max_comments = 5
+max_reactions = 10
+chunk_size = 50        # profiles per Apify actor run
+include_reposts = true
+include_quote_posts = true
+
+[prices_usd_per_1000]  # HarvestAPI pay-per-event prices, used for --dry-run and the per-run spend cap
+posts = 1.50
+comments = 2.00
+reactions = 2.00
+
+# Activity windows are fixed in code at 7 / 30 / 90 days: the output field names (active_30d, ..._count_30d)
+# and the question text below all depend on them, so they are deliberately not configurable.
+
+[judge]
+model = "jev-latest"
+outreach_ready_threshold = 0.4   # linkedin_outreach_ready = noul probability >= this
+workers = 8
+
+# --- TypeSafe questions. State sent per profile: {"summary": {...}, "evidence": [...]} ---
+# evidence items: posts/reposts/comments carry exact "age_days"; reactions carry "age_days_at_most"
+# (LinkedIn exposes no reaction timestamp; a reaction cannot be older than the post it is on).
+# Ages are days with one decimal (30.9 = just over 30 days). summary may list "sources_unavailable" when an actor failed.
+
+[questions.activity_status]
+type = "choice"
+instructions = "Based on the observed public LinkedIn activity evidence, what is this person's current activity status?"
+[questions.activity_status.criteria]
+active = "At least one piece of evidence shows activity within the last 30 days."
+stale = "The most recent evidence of activity is between 31 and 90 days old."
+inactive = "Evidence of activity exists, but none of it shows activity within the last 90 days."
+
+[questions.activity_level]
+type = "score"
+instructions = "How frequently is this person publicly active on LinkedIn, judging by how much of the evidence is recent and how varied it is?"
+labels = ["minimal", "low", "moderate", "high"]
+criteria = [
+  "Nothing in the last 90 days; only old traces of activity.",
+  "A single or occasional action in the last 90 days, such as one reaction or one comment.",
+  "Several actions spread across the last 30 to 90 days, showing they return to LinkedIn regularly.",
+  "Many actions within the last 30 days including some within the last 7 days, often mixing their own posts or comments with reactions.",
+]
+
+[questions.activity_confidence]
+type = "score"
+instructions = "How strongly does the evidence support a conclusion about when this person was last active on LinkedIn?"
+labels = ["low", "medium", "high"]
+criteria = [
+  "Very little evidence, or only reactions on old posts where the true reaction date is unknown.",
+  "Some dated evidence, but it is sparse or comes from a single kind of activity.",
+  "Multiple pieces of evidence with exact dates, such as the person's own posts or comments, that agree with each other.",
+]
+
+[questions.linkedin_outreach_ready]
+type = "noul"
+instructions = "Does the evidence show that this person has used LinkedIn within roughly the last 30 days, making LinkedIn a worthwhile channel to reach them on right now?"

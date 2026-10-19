@@ -24,6 +24,13 @@ def linkedin_url(value):
     return 'https://www.linkedin.com/in/' + parts[1].lower()
 
 
+def location_text(value):
+    """HarvestAPI location: a plain string, or {linkedinText, parsed: {text}} on full profiles."""
+    if isinstance(value, dict):
+        return value.get('linkedinText') or (value.get('parsed') or {}).get('text') or ''
+    return value or ''
+
+
 def valid_email(value):
     return bool(re.fullmatch(r'[^\s@*]+@[^\s@*]+\.[^\s@*]+', value or ''))
 

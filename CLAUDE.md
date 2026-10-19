@@ -1,6 +1,12 @@
 # Operating this play
 
-Read README.md for current commands. Providers: Apify, OpenAI, Prospeo, Smartlead; optional Supabase.
+Read README.md for current commands. Providers: Apify, Prospeo, Smartlead; optional OpenAI (scoring alternative), Supabase and TypeSafe (for `--activity`).
+
+Scoring is your job unless OPENAI_API_KEY is set: after a harvest run `uv run src/rank.py --dump --slug <slug>`, judge every engager with the rubric in `src/rank.py` SYSTEM (stingy: most engagers are 1-2; the user's own profile and the source author are 1), write `output/<slug>/scores.json` as `{"results": [{i, icp_fit, intent, clean_title, company_guess}]}`, then continue with `uv run run.py --slug <slug> --skip-harvest --scores output/<slug>/scores.json ...`. Never require an OpenAI key.
+
+A single post link (linkedin.com/posts/..., /feed/update/..., or lnkd.in/...) means `--post`: harvest only that post, never the author's last 10 posts. A profile link means `--profile`.
+
+Every run ends with `src/summary.py` output (counts plus the top rows by name). Paste that summary into your reply; the user does not open CSVs.
 
 Use the user's ICP and target profiles. Never invent an ICP from unrelated prior projects. Keep API credentials in .env and never print them. Proceed with authorized work without repeated permission prompts.
 
@@ -8,4 +14,8 @@ Run `run.py` for a new harvest, or individual stage commands for retries. Review
 
 For recurring sweeps choose a dated slug for each target. Reuse a run ID only for retries. Do not mark contacts as sent merely because they were harvested or exported. Supabase stores observations; Smartlead receipts track import outcomes. Do not infer success from a zero HTTP error count.
 
-Validation: `python -m unittest discover -s tests -v`.
+`run.py` resolves qualified opaque `/in/ACoAA...` engagers to public URLs by default (`src/resolve.py`, $0.004 per qualified opaque profile; `--no-resolve` skips it).
+
+`--activity` (or `src/activity.py` standalone) spends Apify at about $0.04 per profile. Run `src/activity.py --dry-run` first and state the estimate and hard cap before a paid run. `activity.toml` is user-owned: propose changes, never edit it. The `/setup` and `/first-run` commands cover onboarding.
+
+Validation: `uv run python -m unittest discover -s tests -v`.

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src import common, email_enrich, harvest, icp, push, rank, supabase_export
+from src import activity, common, email_enrich, harvest, icp, push, rank, resolve, summary, supabase_export
 
 
 def verified_row(**changes):
@@ -236,3 +236,172 @@ class ScoringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ActivityTests(unittest.TestCase):
+    @patch('src.activity.subprocess.run')
+    def test_eligibility_join_and_miss_reasons(self, run):
+        def fake(cmd, **kwargs):
+            self.assertEqual(Path(cmd[2]).read_text().split(), ['https://www.linkedin.com/in/jane'])
+            out = Path(cmd[cmd.index('--out') + 1])
+            common.write_csv(out / '20260101-000000.csv',
+                             [{'linkedin_url': 'https://www.linkedin.com/in/jane', 'activity_status': 'active',
+                               'linkedin_outreach_ready': 'True', 'outreach_ready_probability': '0.9'}],
+                             ['linkedin_url', 'activity_status', 'linkedin_outreach_ready', 'outreach_ready_probability'])
+            return SimpleNamespace(returncode=0)
+        run.side_effect = fake
+        rows = [{'name': 'Jane', 'linkedin_url': 'https://linkedin.com/in/Jane/', 'icp_fit': '5'},
+                {'name': 'Opaque', 'linkedin_url': 'https://linkedin.com/in/ACoAA123', 'icp_fit': '5'},
+                {'name': 'Low', 'linkedin_url': 'https://linkedin.com/in/low', 'icp_fit': '2'}]
+        with tempfile.TemporaryDirectory() as d:
+            source, output = str(Path(d) / 'ranked.csv'), str(Path(d) / 'activity.csv')
+            common.write_csv(source, rows, ['name', 'linkedin_url', 'icp_fit'])
+            with patch('sys.argv', ['activity.py', '--input', source, '--output', output]):
+                activity.main()
+            got, fields = common.read_csv(output)
+        self.assertEqual(fields, ['name', 'linkedin_url', 'icp_fit'] + activity.FIELDS)
+        self.assertEqual(got[0]['linkedin_outreach_ready'], 'true')
+        self.assertEqual(got[0]['activity_miss_reason'], '')
+        self.assertEqual(got[1]['activity_miss_reason'], 'no_public_url')
+        self.assertEqual(got[2]['activity_miss_reason'], 'below_min_fit')
+
+    def test_emoji_slug_attributes_actor_items(self):
+        from src import activity_intel
+        url = 'https://www.linkedin.com/in/cody-smith-🇨🇦-49b'
+        grouped, missed = activity_intel.attribute('comments', [{'query': {'profile': url}, 'commentary': 'x'}], [activity_intel.username(url)])
+        self.assertEqual((missed, len(grouped[activity_intel.username(url)])), (0, 1))
+
+    @patch('src.activity.subprocess.run')
+    def test_nothing_eligible_skips_tool(self, run):
+        with tempfile.TemporaryDirectory() as d:
+            source, output = str(Path(d) / 'ranked.csv'), str(Path(d) / 'activity.csv')
+            common.write_csv(source, [{'name': 'Low', 'linkedin_url': 'https://linkedin.com/in/low', 'icp_fit': '1'}],
+                             ['name', 'linkedin_url', 'icp_fit'])
+            with patch('sys.argv', ['activity.py', '--input', source, '--output', output]):
+                activity.main()
+            self.assertEqual(common.read_csv(output)[0][0]['activity_miss_reason'], 'below_min_fit')
+        run.assert_not_called()
+
+
+class ScorerAndSummaryTests(unittest.TestCase):
+    def test_align_accepts_in_session_scores_and_rejects_gaps(self):
+        good = {'results': [{'i': 1, 'icp_fit': 4, 'intent': None}, {'i': 0, 'icp_fit': 2, 'intent': 'high'}]}
+        self.assertEqual([r['icp_fit'] for r in rank.align(good, 2)], [2, 4])
+        for bad in [{'results': [{'i': 0, 'icp_fit': 4}]},                       # missing row 1
+                    {'results': [{'i': 0, 'icp_fit': 6}, {'i': 1, 'icp_fit': 1}]},  # fit out of range
+                    {'results': [{'i': 0, 'icp_fit': 3, 'intent': 'hot'}, {'i': 1, 'icp_fit': 1}]}]:
+            with self.assertRaises(ValueError):
+                rank.align(bad, 2)
+
+    @patch('src.rank.score_batch')
+    def test_rank_scores_file_skips_openai(self, score_batch):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / 's'; base.mkdir()
+            (base / 'engagers.json').write_text(json.dumps([
+                {'id': 'A', 'name': 'Jane', 'position': 'CRO', 'engagement_count': 2, 'comments': ['need help'], 'linkedinUrl': 'https://linkedin.com/in/jane'},
+                {'id': 'B', 'name': 'Bob', 'position': 'Student', 'engagement_count': 1, 'reaction_types': ['LIKE']}]))
+            (base / 'recipient_icp.json').write_text('{}')
+            scores = Path(d) / 'scores.json'
+            scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 5, 'intent': 'high', 'clean_title': 'CRO'},
+                                                      {'i': 1, 'icp_fit': 1, 'intent': None}]}))
+            with patch.dict('os.environ', {'OPENAI_API_KEY': ''}), \
+                 patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+                rank.main()
+            rows, cols = common.read_csv(base / 'ranked_engagers.csv')
+        score_batch.assert_not_called()
+        self.assertEqual(cols[cols.index('company_guess') + 1], 'location')
+        self.assertEqual([(r['name'], r['icp_fit'], r['intent']) for r in rows], [('Jane', '5', 'high'), ('Bob', '1', 'low')])
+
+    def test_summary_names_and_breakdowns(self):
+        rows = [{'name': 'Jane', 'clean_title': 'CRO', 'company_guess': 'Acme', 'icp_fit': '5', 'intent': 'high', 'rank_score': '9',
+                 'linkedin_url': 'https://linkedin.com/in/jane', 'activity_status': 'active', 'linkedin_outreach_ready': 'true',
+                 'outreach_ready_probability': '0.9', 'last_activity_type': 'post', 'data_quality_warning': 'false', 'activity_miss_reason': ''},
+                {'name': 'Bob', 'clean_title': 'Student', 'company_guess': '', 'icp_fit': '1', 'intent': 'low', 'rank_score': '0.3',
+                 'linkedin_url': 'https://linkedin.com/in/ACoAA1', 'activity_status': '', 'linkedin_outreach_ready': '',
+                 'outreach_ready_probability': '', 'last_activity_type': '', 'data_quality_warning': '', 'activity_miss_reason': 'below_min_fit'}]
+        text = '\n'.join(summary.summarize(rows, top=1))
+        self.assertIn('Qualified (fit>=4): 1; with public profile URL: 1; high-intent comments: 1', text)
+        self.assertIn("checked 1, outreach-ready 1", text)
+        self.assertIn('Jane', text)
+        self.assertNotIn('  2 Bob', text)  # top=1 hides the second row
+
+    def test_post_url_resolution_and_tagging(self):
+        self.assertEqual(harvest.resolve_post('https://www.linkedin.com/posts/a_b-1-c/?utm_source=x'), 'https://www.linkedin.com/posts/a_b-1-c/')
+        self.assertEqual(harvest.resolve_post('linkedin.com/feed/update/urn:li:activity:1/'), 'https://www.linkedin.com/feed/update/urn:li:activity:1/')
+        self.assertEqual(harvest.resolve_post('https://www.linkedin.com/in/someone'), '')
+        self.assertEqual(harvest.resolve_post('https://evil.com/posts/x'), '')
+        with patch('src.harvest.requests.head') as head:
+            head.return_value = SimpleNamespace(url='https://www.linkedin.com/posts/a_b-1-c/?trk=share')
+            self.assertEqual(harvest.resolve_post('https://lnkd.in/p/abc'), 'https://www.linkedin.com/posts/a_b-1-c/')
+        items = harvest.tag_post_items([{'actor': {'id': 'A', 'name': 'J'}, 'reactionType': 'LIKE', 'postId': 'p1'}], 'reaction') + \
+                harvest.tag_post_items([{'actor': {'id': 'A', 'name': 'J'}, 'commentary': 'hi', 'postId': 'p1'}], 'comment')
+        eng = harvest.build_engagers(items)
+        self.assertEqual((len(eng), eng[0]['reaction_types'], eng[0]['comments'], eng[0]['engagement_count']), (1, ['LIKE'], ['hi'], 1))
+
+
+class OpaqueIdTests(unittest.TestCase):
+    def test_harvest_main_mode_profile_fields(self):
+        main = {'id': 'ACoAA1', 'name': 'Adam', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA1',
+                'publicIdentifier': 'adamj', 'headline': 'VP Sales @ Acme',
+                'location': {'linkedinText': 'Austin, Texas, United States'},
+                'currentPosition': [{'position': 'VP Sales', 'companyName': 'Acme'}]}
+        short = {'id': 'ACoAA2', 'name': 'Bo', 'linkedinUrl': 'https://www.linkedin.com/in/ACoAA2', 'position': 'CRO'}
+        eng = {e['id']: e for e in harvest.build_engagers(harvest.tag_post_items(
+            [{'actor': main, 'postId': 'p'}, {'actor': short, 'postId': 'p'}], 'reaction'))}
+        self.assertEqual((eng['ACoAA1']['linkedinUrl'], eng['ACoAA1']['location'], eng['ACoAA1']['company'],
+                          eng['ACoAA1']['position']),
+                         ('https://www.linkedin.com/in/adamj', 'Austin, Texas, United States', 'Acme', 'VP Sales @ Acme'))
+        self.assertEqual((eng['ACoAA2']['linkedinUrl'], eng['ACoAA2']['position'], eng['ACoAA2']['location']),
+                         ('https://www.linkedin.com/in/ACoAA2', 'CRO', ''))
+        line = rank.engager_lines([eng['ACoAA1']])[0]
+        self.assertIn('location: "Austin, Texas, United States"', line)
+        self.assertIn('company: "Acme"', line)
+
+    def write_ranked(self, d):
+        rows = [{'name': 'Hot', 'icp_fit': '5', 'linkedin_url': 'https://www.linkedin.com/in/ACoAA5', 'actor_id': 'ACoAA5'},
+                {'name': 'Cold', 'icp_fit': '2', 'linkedin_url': 'https://www.linkedin.com/in/ACoAA2', 'actor_id': 'ACoAA2'},
+                {'name': 'Public', 'icp_fit': '5', 'linkedin_url': 'https://www.linkedin.com/in/jane', 'actor_id': 'ACoAA9'},
+                {'name': 'Gone', 'icp_fit': '4', 'linkedin_url': 'https://www.linkedin.com/in/ACoAA4', 'actor_id': 'ACoAA4'}]
+        source, output = str(Path(d) / 'ranked.csv'), str(Path(d) / 'resolved.csv')
+        common.write_csv(source, rows, list(rows[0]))
+        return source, output
+
+    @patch.dict('os.environ', {'APIFY_TOKEN': 'test'})
+    @patch('src.resolve.scrape')
+    def test_resolve_statuses(self, scrape):
+        scrape.return_value = ({'ACoAA5': {'id': 'ACoAA5', 'linkedinUrl': 'https://www.linkedin.com/in/Hot-One',
+                                           'location': {'linkedinText': 'London, UK'}}}, True)
+        with tempfile.TemporaryDirectory() as d:
+            source, output = self.write_ranked(d)
+            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output]):
+                resolve.main()
+            rows, fields = common.read_csv(output)
+        self.assertEqual(scrape.call_args.args[0], ['ACoAA5', 'ACoAA4'])
+        got = {r['name']: (r['resolve_status'], r['linkedin_url'], r['location']) for r in rows}
+        self.assertEqual(got['Hot'], ('resolved', 'https://www.linkedin.com/in/hot-one', 'London, UK'))
+        self.assertEqual(got['Cold'][0], 'skipped')
+        self.assertEqual(got['Public'][0], 'skipped')
+        self.assertEqual(got['Gone'], ('not_found', 'https://www.linkedin.com/in/ACoAA4', ''))
+        self.assertIn("'resolved': 1", '\n'.join(summary.summarize(rows)))
+
+    @patch.dict('os.environ', {'APIFY_TOKEN': 'test'})
+    @patch('src.resolve.scrape')
+    def test_resolve_error_and_dry_run(self, scrape):
+        scrape.side_effect = RuntimeError('boom')
+        with tempfile.TemporaryDirectory() as d:
+            source, output = self.write_ranked(d)
+            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output]):
+                resolve.main()
+            self.assertEqual([r['resolve_status'] for r in common.read_csv(output)[0]],
+                             ['error', 'skipped', 'skipped', 'error'])
+            scrape.side_effect = None  # free-plan refusal: SUCCEEDED run whose only item is an error
+            scrape.return_value = resolve.parse([{'error': 'Free users are limited to 10 items per run.'}], 'SUCCEEDED')
+            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output]):
+                resolve.main()
+            self.assertEqual(common.read_csv(output)[0][3]['resolve_status'], 'error')
+            scrape.reset_mock()
+            Path(output).unlink()
+            with patch('sys.argv', ['resolve.py', '--input', source, '--output', output, '--dry-run']):
+                resolve.main()
+            self.assertFalse(Path(output).exists())
+        scrape.assert_not_called()

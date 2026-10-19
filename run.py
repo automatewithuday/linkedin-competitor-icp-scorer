@@ -1,8 +1,11 @@
-"""Orchestrator: harvest -> (enrich) -> icp -> rank
+"""Orchestrator: harvest -> (enrich) -> icp -> rank -> resolve -> (activity) -> (emails) -> (supabase) -> (smartlead preview) -> summary
 
 Usage:
-  python run.py --profile <linkedin-url> --slug <slug> --domain <domain> [options]
-  python run.py --profile <linkedin-url> --slug <slug> --icp icp.yaml [options]
+  uv run run.py --profile <linkedin-url> --slug <slug> --icp icp.yaml --scores output/<slug>/scores.json [options]
+  uv run run.py --post <post-url>        --slug <slug> --icp icp.yaml --scores ... [options]   # one post only
+  uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores ...                        # reuse a paid harvest
+
+Scoring: pass --scores (judgments made in-session by Claude; see src/rank.py --dump) or set OPENAI_API_KEY.
 """
 import argparse
 import os
@@ -15,9 +18,7 @@ from pathlib import Path
 
 
 def run_step(label: str, cmd: list[str]) -> None:
-    print(f"\n{'='*60}")
-    print(f"STEP: {label}")
-    print(f"{'='*60}")
+    print(f"\n{'='*60}\nSTEP: {label}\n{'='*60}", flush=True)  # flush: keep headers ahead of child output when piped
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
         sys.exit(f"Step failed: {label} (exit {result.returncode})")
@@ -27,7 +28,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="Full pipeline: harvest LinkedIn engagers, derive ICP, rank as warm buyers"
     )
-    ap.add_argument("--profile", required=True, help="LinkedIn profile URL to harvest")
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--profile", help="LinkedIn profile URL: harvest its recent posts")
+    src.add_argument("--post", help="LinkedIn post URL (lnkd.in accepted): harvest only this one post")
+    ap.add_argument("--skip-harvest", action="store_true",
+                    help="Reuse output/<slug>/posts.json + engagers.json from an earlier paid harvest")
+    ap.add_argument("--scores", metavar="PATH",
+                    help="JSON judgments for rank.py (made in-session, no OpenAI). Without it OPENAI_API_KEY is required")
     ap.add_argument("--slug", required=True, help="Short identifier for this run (output folder name)")
     ap.add_argument("--output-dir", default="./output", help="Base output directory")
 
@@ -46,18 +53,32 @@ def main() -> None:
     ap.add_argument("--max-lookups", type=int, default=100)
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
     ap.add_argument("--campaign-id", type=int, help="Generate a Smartlead import preview")
+    ap.add_argument("--no-resolve", action="store_true",
+                    help="Skip resolving qualified opaque /in/ACoAA... engagers to public URLs "
+                         "(default: on; Apify, $0.004 per qualified opaque profile)")
+    ap.add_argument("--activity", action="store_true",
+                    help="Check LinkedIn activity of qualified leads (Apify, ~$0.04/profile; needs TYPESAFE_API_KEY)")
     args = ap.parse_args()
     load_dotenv()
-    if not linkedin_url(args.profile):
-        ap.error("--profile must be a public LinkedIn /in/ URL")
+    if args.skip_harvest:
+        if args.profile or args.post:
+            ap.error("--skip-harvest reuses the saved harvest; drop --profile/--post")
+    elif args.profile:
+        if not linkedin_url(args.profile):
+            ap.error("--profile must be a public LinkedIn /in/ URL")
+    elif args.post:
+        if not re.search(r'(linkedin\.com/(posts/|feed/update/)|lnkd\.in/)', args.post):
+            ap.error("--post must be a LinkedIn post URL or an lnkd.in link")
+    else:
+        ap.error("one of --profile, --post or --skip-harvest is required")
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]*', args.slug):
         ap.error("Slug must contain only letters, digits, underscores and hyphens")
     if min(args.max_posts, args.max_reactions, args.max_comments) < 0 or args.max_lookups < 1:
         ap.error("Invalid scrape or lookup limits")
     if args.campaign_id is not None and (args.campaign_id < 1 or not args.find_emails):
         ap.error("--campaign-id must be positive and requires --find-emails")
-    required = ['OPENAI_API_KEY']
-    if not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
+    required = [] if args.scores else ['OPENAI_API_KEY']
+    if not (args.skip_harvest and args.no_resolve) and not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
         required.append('APIFY_TOKEN')
     if args.domain:
         required.append('FIRECRAWL_API_KEY')
@@ -67,28 +88,39 @@ def main() -> None:
         required.append('SUPABASE_URL')
         if not (os.getenv('SUPABASE_SECRET_KEY') or os.getenv('SUPABASE_SERVICE_ROLE_KEY')):
             required.append('SUPABASE_SECRET_KEY')
+    if args.activity:
+        required.append('TYPESAFE_API_KEY')
+        if not Path('activity.toml').is_file():
+            ap.error('activity.toml does not exist')
     missing = [key for key in required if not os.getenv(key)]
     if missing:
         ap.error('Missing configuration: ' + ', '.join(missing))
     if args.icp and not Path(args.icp).is_file():
         ap.error('ICP file does not exist')
+    if args.scores and not Path(args.scores).is_file():
+        ap.error('Scores file does not exist (run `src/rank.py --dump --slug <slug>` and score it first)')
+    if args.skip_harvest:
+        for name in ("posts.json", "engagers.json"):
+            if not (Path(args.output_dir) / args.slug / name).is_file():
+                ap.error(f'--skip-harvest needs output/{args.slug}/{name}')
 
     py = sys.executable
     out = args.output_dir
     slug = args.slug
 
-    # Step 1: Harvest
-    harvest_cmd = [
-        py, "src/harvest.py",
-        "--profile", args.profile,
-        "--slug", slug,
-        "--max-posts", str(args.max_posts),
-        "--max-reactions", str(args.max_reactions),
-        "--max-comments", str(args.max_comments),
-        "--posted-limit", args.posted_limit,
-        "--output-dir", out,
-    ]
-    run_step("Harvest posts + engagers", harvest_cmd)
+    # Step 1: Harvest (one post, or a profile's recent posts)
+    if not args.skip_harvest:
+        harvest_cmd = [
+            py, "src/harvest.py",
+            "--post" if args.post else "--profile", args.post or args.profile,
+            "--slug", slug,
+            "--max-posts", str(args.max_posts),
+            "--max-reactions", str(args.max_reactions),
+            "--max-comments", str(args.max_comments),
+            "--posted-limit", args.posted_limit,
+            "--output-dir", out,
+        ]
+        run_step("Harvest engagers" + (" (single post)" if args.post else " (profile posts)"), harvest_cmd)
 
     # Step 2 (optional): Enrich companies
     if args.enrich:
@@ -118,23 +150,37 @@ def main() -> None:
         "--slug", slug,
         "--output-dir", out,
     ]
-    run_step("Score + rank engagers", rank_cmd)
+    if args.scores:
+        rank_cmd += ["--scores", args.scores]
+    run_step("Score + rank engagers" + (" (in-session judgments)" if args.scores else " (OpenAI)"), rank_cmd)
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
     final_csv = out_csv
+    if not args.no_resolve:
+        final_csv = out_csv.with_name("resolved.csv")
+        run_step("Resolve opaque profile IDs", [py, "src/resolve.py", "--input", str(out_csv),
+                 "--output", str(final_csv), "--min-fit", str(args.min_fit)])
+    if args.activity:
+        activity_csv = out_csv.with_name("activity.csv")
+        run_step("LinkedIn activity intel", [py, "src/activity.py", "--input", str(final_csv),
+                 "--output", str(activity_csv), "--min-fit", str(args.min_fit)])
+        final_csv = activity_csv
     if args.find_emails:
-        final_csv = out_csv.with_name("enriched.csv")
-        run_step("Prospeo verified emails", [py, "src/email_enrich.py", "--input", str(out_csv),
-                 "--output", str(final_csv), "--min-fit", str(args.min_fit), "--max-lookups", str(args.max_lookups)])
+        enriched = out_csv.with_name("enriched.csv")
+        run_step("Prospeo verified emails", [py, "src/email_enrich.py", "--input", str(final_csv),
+                 "--output", str(enriched), "--min-fit", str(args.min_fit), "--max-lookups", str(args.max_lookups)])
+        final_csv = enriched
     if args.supabase:
         run_step("Supabase snapshots", [py, "src/supabase_export.py", "--input", str(final_csv), "--run-id", slug])
     if args.campaign_id:
         run_step("Smartlead preview", [py, "src/push.py", "--input", str(final_csv),
                  "--campaign-id", str(args.campaign_id), "--min-fit", str(args.min_fit)])
+    run_step("Summary", [py, "src/summary.py", "--input", str(final_csv), "--min-fit", str(args.min_fit)])
     print(f"\n{'='*60}")
     print("PIPELINE COMPLETE")
     print(f"  Slug       : {slug}")
     print(f"  Ranked CSV : {out_csv.resolve()}")
+    print(f"  Final CSV  : {final_csv.resolve()}")
     print(f"{'='*60}")
 
 

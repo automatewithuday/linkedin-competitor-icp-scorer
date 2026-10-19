@@ -69,6 +69,39 @@ GET   /v2/datasets/<dataset-id>/items?token=<APIFY_TOKEN>&format=json
       Returns the flat item array
 ```
 
+**Post mode (`--post`)** uses `harvestapi~linkedin-post-reactions` and `harvestapi~linkedin-post-comments` with `{"posts": [url], "maxItems": n, "profileScraperMode": "main"}` (`"short"` is the actor default and returns the opaque `actor{}` above). In `main` mode `actor{}` is a full profile: `id`, `name`, `firstName`, `lastName`, `linkedinUrl` (vanity), `publicIdentifier`, `headline`, `location`, `currentPosition[]`, `experience[]`, `followerCount`, `connectionsCount`, `industry`, `about`, `education`, `emails`. `position` may be absent; the harvester falls back to `headline`. Price per event: `post-reaction` / `post-comment` $0.002, `main-profile` +$0.002 per engager (`full-profile` $0.004 and `full-profile-with-email` $0.01 are not used).
+
+---
+
+## 1b. Opaque ID resolution - `harvestapi/linkedin-profile-scraper`
+
+Used by `src/resolve.py`. Price: $0.004 per `profile` event. On a free Apify plan the actor is limited to 10 items per run; above that it returns a single `{"error": "Free users are limited to 10 items per run. ..."}` item with run status `SUCCEEDED`.
+
+**Input** (provide at least one of `urls` / `publicIdentifiers` / `profileIds`):
+
+```json
+{"profileIds": ["ACoAA..."], "profileScraperMode": "Profile details no email ($4 per 1k)"}
+```
+
+The mode enum values are literal strings; the other is `"Profile details + email search ($10 per 1k)"`.
+
+**Output** (observed 2026-10-19, one item per resolved profile):
+
+```
+id                 the ACoAA... id that was sent
+originalQuery      {"profileId": "ACoAA..."}
+publicIdentifier   vanity slug, e.g. "javeriashah"
+linkedinUrl        https://www.linkedin.com/in/<publicIdentifier>
+firstName, lastName, headline
+location           {"linkedinText": "London, England, United Kingdom", "countryCode": "GB",
+                    "parsed": {"text", "countryCode", "country", "countryFull", "state", "city", "regionCode"}}
+currentPosition[]  {position, companyName, companyUniversalName, companyLinkedinUrl, companyId, location,
+                    employmentType, workplaceType, duration, description, skills, startDate, endDate, companyLogo}
+experience[]       same shape as currentPosition
+```
+
+Also present: `about`, `causes`, `certifications`, `composeOptionType`, `connectionsCount`, `courses`, `coverPicture`, `creator`, `education`, `emails`, `featured`, `followerCount`, `hiring`, `honorsAndAwards`, `industry`, `influencer`, `interests`, `languages`, `memorialized`, `moreProfiles`, `multiLocaleHeadline`, `objectUrn`, `openToWork`, `organizations`, `patents`, `photo`, `premium`, `primaryLocale`, `profileActions`, `profileLocales`, `profilePicture`, `profileTopEducation`, `projects`, `publications`, `receivedRecommendations`, `registeredAt`, `sectionTotals`, `services`, `skills`, `topSkills`, `verified`, `volunteering`, `websites` (optional).
+
 ---
 
 ## 2. Company enrich - `harvestapi~linkedin-company`
