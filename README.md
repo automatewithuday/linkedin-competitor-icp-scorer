@@ -54,4 +54,4 @@ Signal definitions are tailored during onboarding. Any existing dated evidence i
 
 Email discovery, Jev Activity Intel through TypeSafe, drafts and campaign integrations are preserved as legacy tools and are outside this core release. Core exports cannot be passed into those legacy integrations.
 
-[Commands and data model](docs/OPERATIONS.md) · [Example ICP](examples/client-profile.example.yaml) · [Example export](examples/all_leads.core.sample.csv)
+[Commands and data model](docs/OPERATIONS.md) · [Example ICP](examples/client-profile.example.yaml) · [Example export](examples/all_leads.core.sample.csv) · [Live sample validation](docs/VALIDATION.md)
