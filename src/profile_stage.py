@@ -2,8 +2,11 @@
 import json
 import os
 
-from . import company_stage, coredb, harvest, ledger, resolve
+from . import company_stage, coredb, harvest, ledger
 from .common import linkedin_url
+
+PROFILE_ACTOR='harvestapi/linkedin-profile-scraper'  # $0.004 per profile
+PROFILE_MODE='Profile details no email ($4 per 1k)'
 
 
 def enrich_profiles(con,slug,max_lookups=10,max_usd=0.25,dry_run=False,retry_unknown=False):
@@ -18,16 +21,16 @@ def enrich_profiles(con,slug,max_lookups=10,max_usd=0.25,dry_run=False,retry_unk
         if not identity:continue
         hit=ledger.cached_lookup(con,opaque) if opaque else None
         if hit and hit['status']=='resolved' and hit.get('profile_evidence'):
-            rid=coredb.new_request(con,'legacy','profile_cache',identity,status='complete')
+            rid=coredb.new_request(con,'ledger','profile_cache',identity,status='complete')
             raw_id=coredb.raw(con,rid,identity,hit,'normalized_only')
             e={'id':opaque,'name':facts.get('name'),'linkedinUrl':hit['public_url'],
                'position':facts.get('headline'),'location':hit.get('location') or facts.get('location'),
                'company':hit.get('company'),'profile_evidence':hit['profile_evidence'],'comments':facts.get('comments',[])}
             coredb.ingest_person(con,slug,e,raw_id);continue
         payload={'profileIds':[opaque]} if opaque else {'urls':[public]}
-        payload['profileScraperMode']=resolve.MODE
+        payload['profileScraperMode']=PROFILE_MODE
         if dry_run:planned+=1;continue
-        request,start=company_stage.claim(con,slug,identity,payload,max_lookups,max_usd,0.02,retry_unknown,'profile',resolve.ACTOR.replace('/','~'))
+        request,start=company_stage.claim(con,slug,identity,payload,max_lookups,max_usd,0.02,retry_unknown,'profile',PROFILE_ACTOR.replace('/','~'))
         if not request:continue
         if request['status'] in ('complete','not_found'):
             record=con.execute("SELECT id,data FROM raw_records WHERE request_id=? AND record_key='dataset'",(request['id'],)).fetchone()

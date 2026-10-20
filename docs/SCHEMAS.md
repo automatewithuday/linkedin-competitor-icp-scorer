@@ -1,166 +1,77 @@
-# Actor Schemas
+# Schemas
 
-Reference for the Apify actors and enrichment evidence used by this tool.
+Reference for the exports this tool writes, the assessment packet the agent judges, and the provider payloads behind them.
 
-## Optional GetLeads evidence
+## Exports (`schema_version` 2)
 
-`src/getleads.py` uses [GetLeads REST enrichment](https://www.getleads.io/docs/#2-from-linkedin-profile-url): bearer authentication from GETLEADS_API_KEY, `POST https://app.getleads.io/api/v1/enrich/from-linkedin`, body `{"items":[{"linkedin_url":"https://www.linkedin.com/in/example"}],"limit_per_item":1}`. The adapter sends at most 25 URLs per request (provider maximum 100), correlates results by their echoed `linkedinUrl`, and requires a matching `data.linkedin_url` before accepting a match. A completed miss is `success:false,data:null`. Missing, duplicated or conflicting identities hold the batch as unknown.
+`all_leads.csv` and `qualified_leads.csv` share one header. One row per engager, choosing the best current employment/segment pair; the others stay in `employment_decisions`.
 
-The allowlisted `data` fields are normalized into `engagers.json` → `icp_enrichment`:
-
-| Internal field | Provider fields (first populated) |
+| Column | Meaning |
 |---|---|
-| `title` | `current_title` |
-| `company` | `current_company_name`, `co_name` |
-| `company_domain` | `current_company_website`, `org_domain`, `co_website` |
-| `company_industry` | `current_company_industry`, `main_industry` |
-| `company_size` | `employee_count_range` (a band, not an exact count) |
-| `company_description` | `co_description` |
-| `person_location` | `current_location` |
-| `person_country` | `contact_country`, `location_country` |
+| `schema_version` | Always `2`. |
+| `name`, `linkedin_url` | The person; `linkedin_url` is the public `/in/` URL when known, else empty. |
+| `company_id`, `company_name`, `company_linkedin_url` | The current employer this row was judged at. |
+| `employment_id`, `current_title` | The employment relationship and the title it carries. |
+| `segment` | The ICP segment whose company and person criteria both applied. |
+| `company_decision`, `company_reason` | qualified / not_qualified / needs_review for the company, with the explanation. |
+| `person_decision`, `person_reason` | The same for the person at that company. People are only judged after their company qualifies. |
+| `qualification_status`, `qualification_reason` | Overall decision. A draft (unlocked) ICP turns `qualified` into `needs_review`. |
+| `eligibility_status` | `eligible` (in the `qualified_leads` view), `hold`, `suppressed:<reason>` or `in_campaign:<campaign>`. |
+| `priority_score` | Count of matched preferred criteria plus fresh optional signals; orders rows within a decision group, never a gate. |
+| `profile_version`, `assessment_id`, `score_context` | Provenance: which ICP version and assessment produced the row, and the evidence fingerprint it was bound to. |
+| `evidence_refs` | JSON list of observation IDs the decision cites. |
+| `employment_decisions` | JSON list of every company/segment pair assessed for this person. |
 
-`source:getleads` and the local `checked_at` timestamp accompany the evidence. Work email is retained only in the shared provider cache, alongside an internal email_lookup_complete marker; neither is passed into scoring evidence or its hash. Phone fields and unknown fields are discarded. Company HQ fields never fill person geography. The scorer sees this data separately from the harvested fields and must explain conflicts or absent evidence. CSV uses `getleads_` prefixes for these fields, plus `getleads_status` and `getleads_checked_at`.
+Rows are ordered qualified, then needs_review, then not_qualified, by priority within each group.
 
-SQLite automatically adds `provider_enrichments` (URL cache), `enrichment_attempts` (durable submission cap/history), and `profile_snapshots.enrichment_json`. Enrichment evidence participates in evidence hashes and score contexts; the local lookup timestamp alone does not invalidate a score. Old snapshots, purchased lookups and campaign history are preserved. See [operations](OPERATIONS.md#optional-getleads-icp-evidence) for limits, caching and recovery.
+## Assessment packet (`output/<slug>/assessment-packet.json`)
 
----
+`{"schema_version": 2, "profile_version": N, "prompt": "...", "icp": {...}, "packets": [...]}`. Each packet is one pending entity:
 
-## 1. Posts + Engagers - `harvestapi~linkedin-profile-posts`
+| Field | Meaning |
+|---|---|
+| `entity_type`, `entity_id` | `company` or `person` and its ID. |
+| `company_id`, `employment_id`, `segment` | The company (and for people, the employment) and segment being judged. |
+| `score_context` | Fingerprint of ICP version, prompt, entity and evidence. Copy it exactly into the judgment. |
+| `facts` | The current observed facts for the entity. For people: `title`, `employment`, `current_roles` (this employment only), `location`, `headline`, `about`, `comments`. |
+| `observation_ids` | The only IDs a judgment may cite in `evidence_refs`. |
+| `criteria`, `signals` | The segment's criteria for this entity type and its signal definitions. |
+| `dependencies` | Entity hashes the assessment depends on; any change makes it stale. |
 
-Scrapes posts, reactions, and comments for a LinkedIn profile in a single run. No separate engager actor needed.
+A judgment is `{entity_type, entity_id, employment_id, segment, score_context, decision, confidence, reason, criterion_results}`, with each criterion result `{criterion_id, outcome (match/no_match/unknown), confidence, reason, evidence_quote, evidence_refs}`. See [operations](OPERATIONS.md#in-session-assessment-protocol).
 
-**Pricing:** PRICE_PER_DATASET_ITEM = ~$0.00175/item. A run pulling 8 posts with 100 reactions + 50 comments each returns ~1,200 items = ~$2.10.
+## Calibration packet
 
-**Input:**
+`start-round` and `round --round N` print `{round_id, status, prompt, icp, cases, results}`. Each case is `{company_id, category, score_context, evidence}`; `results` is empty until scored, then holds the submitted `{company_id, score_context, decision, confidence, reason, criterion_results}` list. The round review block prints the same decisions as text.
 
-```json
-{
-  "targetUrls": ["https://www.linkedin.com/in/<slug>"],
-  "maxPosts": 0,
-  "postedLimit": "month",
-  "scrapeReactions": true,
-  "maxReactions": 100,
-  "scrapeComments": true,
-  "maxComments": 50,
-  "commentsPostedLimit": "month",
-  "includeReposts": true,
-  "includeQuotePosts": true
-}
-```
+## Profile (`profiles/<name>/client-profile.yaml`)
 
-| Field | Type | Notes |
-|-------|------|-------|
-| `targetUrls` | string[] | One profile URL per run |
-| `maxPosts` | int | `0` = all available |
-| `postedLimit` | string | `"24h"` / `"week"` / `"month"` |
-| `maxReactions` | int | Default 5; raise for larger engager pool |
-| `maxComments` | int | Default 5; comments carry more intent signal |
+`schema_version: 2`, `name`, `business {website, description, one_liner, best_customers}`, `segments[]`, `offer {cta, lead_magnet}`, `tone`, `constraints`. Each segment has `id`, `name`, `company[]`, `person[]`, `signals[]`. Criteria: `{id, field, operator (equals/one_of/contains/range/semantic), value, mode (mandatory/preferred/excluded), description}`. Signals: `{id, kind, entity, description, evidence_required, max_age_days, mandatory}`. [Example](../examples/client-profile.example.yaml).
 
-**Output:** Flat dataset. Discriminate on `type`:
+## Apify actors
 
-| `type` | Meaning |
-|--------|---------|
-| `post` | The profile's post. Has `postId`, content, engagement counts. |
-| `reaction` | An engager who reacted. Has `reactionType` and `actor{}`. |
-| `comment` | An engager who commented. Has `commentary` (text) and `actor{}`. |
+### Posts and engagers: `harvestapi~linkedin-profile-posts` (`--profile`)
 
-**`actor{}` object (present on reaction and comment items):**
+Input `{"targetUrls": [profile], "maxPosts", "postedLimit": "24h|week|month", "scrapeReactions", "maxReactions", "scrapeComments", "maxComments", "commentsPostedLimit", "includeReposts": true, "includeQuotePosts": true}`. Output is a flat dataset keyed by `type`: `post`, `reaction` (with `reactionType`, `actor{}`) and `comment` (with `commentary`, `actor{}`). In this mode `actor{}` carries only `id` (opaque `ACoAA...`), `name`, `linkedinUrl`, `position`, `pictureUrl`; the profile stage resolves the rest. About $0.00175 per item.
 
-```
-actor.id          fsd_profile ID (e.g. ACoAA...)
-actor.name        display name
-actor.linkedinUrl vanity URL from comments; opaque /in/ACoAA... from reactions
-actor.position    headline string, often "<role> @<company>"
-actor.pictureUrl  avatar URL
-```
+### One post: `harvestapi~linkedin-post-reactions` and `harvestapi~linkedin-post-comments` (`--post`)
 
-**Engager extraction logic:** Filter items to `type in (reaction, comment)`. Key by `actor.id`. Deduplicate. Prefer vanity URLs from comments over opaque reaction URLs. Attach comment text when present.
+Input `{"posts": [url], "maxItems": n, "profileScraperMode": "main"}`. In `main` mode `actor{}` is a full profile: `id`, `name`, `linkedinUrl` (vanity), `publicIdentifier`, `headline`, `location`, `currentPosition[]`, `experience[]`, `about`, and more. `post-reaction` / `post-comment` events cost $0.002 each, plus $0.002 per engager for the main profile.
 
-**Accessing results via REST:**
+### Profile resolution: `harvestapi~linkedin-profile-scraper`
 
-```
-POST  /v2/acts/harvestapi~linkedin-profile-posts/runs?token=<APIFY_TOKEN>
-      Body: input JSON above
+Used by the profile stage for people without a public URL or current roles. Input `{"profileIds": ["ACoAA..."]}` or `{"urls": [...]}` with `"profileScraperMode": "Profile details no email ($4 per 1k)"`. One item per resolved profile: `id`, `originalQuery`, `publicIdentifier`, `linkedinUrl`, `headline`, `location {linkedinText, parsed}`, `currentPosition[] {position, companyName, companyLinkedinUrl, companyId, location, startDate, endDate, description}`, `experience[]`, `about`. $0.004 per profile. The Apify free plan limits this actor to 10 items per run and returns one `{"error": ...}` item above that; such a run is recorded as `unknown`, never as a miss.
 
-GET   /v2/actor-runs/<run-id>?token=<APIFY_TOKEN>
-      Poll until status == "SUCCEEDED"
-      Response carries: defaultDatasetId, usageTotalUsd
+### Company enrichment: `harvestapi~linkedin-company`
 
-GET   /v2/datasets/<dataset-id>/items?token=<APIFY_TOKEN>&format=json
-      Returns the flat item array
-```
+Input `{"companies": [company url]}` or `{"searches": [name]}`. Output company objects with `name`, `linkedinUrl`, `id`, `website`, `employeeCount` / `employeeCountRange`, `industries`, `locations[]`, `description`. The company stage keeps `name`, `linkedin_url`, `linkedin_id`, `domain`, `headcount` (exact or `{min, max}` band), `industry`, `location`, `description`. A search result attaches only when its domain corroborates the saved company.
 
-**Post mode (`--post`)** uses `harvestapi~linkedin-post-reactions` and `harvestapi~linkedin-post-comments` with `{"posts": [url], "maxItems": n, "profileScraperMode": "main"}` (`"short"` is the actor default and returns the opaque `actor{}` above). In `main` mode `actor{}` is a full profile: `id`, `name`, `firstName`, `lastName`, `linkedinUrl` (vanity), `publicIdentifier`, `headline`, `location`, `currentPosition[]`, `experience[]`, `followerCount`, `connectionsCount`, `industry`, `about`, `education`, `emails`. `position` may be absent; the harvester falls back to `headline`. Price per event: `post-reaction` / `post-comment` $0.002, `main-profile` +$0.002 per engager (`full-profile` $0.004 and `full-profile-with-email` $0.01 are not used).
+### Current roles
 
----
+`evidence.profile_evidence` keeps up to five current positions (`currentPosition[]`, or `experience[]` entries ending in `Present`): `title`, `company`, `company_id`, `company_linkedin_url`, `company_domain`, `start_date`, `end_date`, `employment_type`, `job_location`, `description`, plus `about`. Job location never replaces the person's location.
 
-## 1b. Opaque ID resolution - `harvestapi/linkedin-profile-scraper`
+## GetLeads (`--getleads`)
 
-Used by `src/resolve.py`. Price: $0.004 per `profile` event. On a free Apify plan the actor is limited to 10 items per run; above that it returns a single `{"error": "Free users are limited to 10 items per run. ..."}` item with run status `SUCCEEDED`.
+[REST enrichment](https://www.getleads.io/docs/#2-from-linkedin-profile-url): bearer authentication from GETLEADS_API_KEY, `POST https://app.getleads.io/api/v1/enrich/from-linkedin`, body `{"items":[{"linkedin_url":"..."}],"limit_per_item":1}`. At most 25 URLs per request. Results are correlated by the echoed `linkedinUrl` and must return a matching `data.linkedin_url`. A completed miss is `success:false,data:null`. Missing, duplicated or conflicting identities hold the batch as unknown. Allowance is checked first through `GET /usage/fair-use`.
 
-**Input** (provide at least one of `urls` / `publicIdentifiers` / `profileIds`):
-
-```json
-{"profileIds": ["ACoAA..."], "profileScraperMode": "Profile details no email ($4 per 1k)"}
-```
-
-The mode enum values are literal strings; the other is `"Profile details + email search ($10 per 1k)"`.
-
-**Output** (observed 2026-10-19, one item per resolved profile):
-
-```
-id                 the ACoAA... id that was sent
-originalQuery      {"profileId": "ACoAA..."}
-publicIdentifier   vanity slug, e.g. "javeriashah"
-linkedinUrl        https://www.linkedin.com/in/<publicIdentifier>
-firstName, lastName, headline
-location           {"linkedinText": "London, England, United Kingdom", "countryCode": "GB",
-                    "parsed": {"text", "countryCode", "country", "countryFull", "state", "city", "regionCode"}}
-currentPosition[]  {position, companyName, companyUniversalName, companyLinkedinUrl, companyId, location,
-                    employmentType, workplaceType, duration, description, skills, startDate, endDate, companyLogo}
-experience[]       same shape as currentPosition
-```
-
-Also present: `about`, `causes`, `certifications`, `composeOptionType`, `connectionsCount`, `courses`, `coverPicture`, `creator`, `education`, `emails`, `featured`, `followerCount`, `hiring`, `honorsAndAwards`, `industry`, `influencer`, `interests`, `languages`, `memorialized`, `moreProfiles`, `multiLocaleHeadline`, `objectUrn`, `openToWork`, `organizations`, `patents`, `photo`, `premium`, `primaryLocale`, `profileActions`, `profileLocales`, `profilePicture`, `profileTopEducation`, `projects`, `publications`, `receivedRecommendations`, `registeredAt`, `sectionTotals`, `services`, `skills`, `topSkills`, `verified`, `volunteering`, `websites` (optional).
-
----
-
-## 2. Company enrich - `harvestapi~linkedin-company`
-
-Bulk company scraper. Use with `--enrich` flag to pull industry, employee count, and location for engager companies.
-
-**Input:** company URLs or names. **Output:** company profile objects.
-
-Exact per-item pricing varies; measure on first run via `usageTotalUsd` in the run response.
-
----
-
-## 3. Ranking (OpenAI, not Apify)
-
-`src/rank.py` calls `gpt-4.1-mini` to score engagers. Not an Apify actor.
-
-**Model:** `gpt-4.1-mini`  
-**Batch size:** 25 engagers per call  
-**Cost:** ~$0.40/M input + $1.60/M output tokens. Typical run: negligible (<$0.10)
-
-**Scores per engager:**
-
-| Field | Range | Description |
-|-------|-------|-------------|
-| `icp_fit` | 1-5 | Semantic match of position headline vs. ICP titles/industries |
-| `qualification_threshold`, `qualification_status` | 1-5; qualified/rejected | Required fit score and whether this person meets it |
-| `qualification_reason` | text, required | Evidence supporting the fit score, ICP mismatches and important missing facts; required for accepted and rejected people |
-| `intent` | high/medium/low | Derived from comment text; reaction weight if no comment |
-| `intent_reason` | text, required | Comment supporting intent, or the limitation of reaction-only engagement |
-| `rank_score` | float | `icp_fit * (1 + ln(engagement_count)) * intent_weight` |
-
-Both reason fields are required in automatic scorer responses and in-session `scores.json` entries. The ledger migrates existing score tables to store them; reasonless scores require a new judgment. The gate adds `eligibility_reason` for suppression, campaign history and score freshness. The optional Activity Intel stage adds `activity_reason` (also `outreach_reason` for compatibility), `activity_model`, status, probability and evidence link. Its default model is Jev (`jev-latest`) through TypeSafe. Skipped checks are `not_checked`; failed judgments are `unknown`, with reasons rather than an inactivity claim.
-
-**Intent weights:** `high=1.0`, `medium=0.6`, `low=0.3`
-
-**Reaction type to intent mapping:**
-
-| Reaction | Intent |
-|----------|--------|
-| INTEREST, PRAISE, APPRECIATION | low |
-| LIKE, EMPATHY, ENTERTAINMENT | low |
+Allowlisted `data` fields: `current_title`, `current_company_name`/`co_name`, `current_company_website`/`org_domain`/`co_website`, `current_company_industry`/`main_industry`, `employee_count_range` (a band), `co_description`, `current_location`, `contact_country`/`location_country`, `current_company_linkedin_url`/`co_linkedin_url`, `current_company_id`. Company facts attach to the saved company only when the company URL, ID or domain corroborates it. `work_email` is stored separately as unverified and is never scoring evidence. The raw response is kept in `getleads_records`; the cache (`provider_enrichments`) and submission cap (`enrichment_attempts`) live in the ledger tables.

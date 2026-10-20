@@ -289,14 +289,23 @@ def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--slug',required=True);ap.add_argument('--output-dir',default='./output');ap.add_argument('--icp',required=True)
     ap.add_argument('--scores');ap.add_argument('--dump',action='store_true')
-    a=ap.parse_args(argv);con=coredb.connect();v=profiles.load(con,a.icp);base=Path(a.output_dir)/a.slug
-    if not con.execute('SELECT 1 FROM core_runs WHERE slug=?',(a.slug,)).fetchone():coredb.import_saved(con,base)
+    a=ap.parse_args(argv);con=coredb.connect();base=Path(a.output_dir)/a.slug
+    if not Path(a.icp).is_file():raise ValueError(f'ICP profile not found: {a.icp}')
+    v=version(con,profiles.load(con,a.icp)['id'])
+    if not con.execute('SELECT 1 FROM core_runs WHERE slug=?',(a.slug,)).fetchone():
+        if not (base/'engagers.json').exists():
+            raise ValueError(f'No saved run named {a.slug!r} under {base.parent}; collect it with run.py first')
+        coredb.import_saved(con,base)
+    if a.scores and not Path(a.scores).is_file():raise ValueError(f'Scores file not found: {a.scores}')
     submitted=json.loads(Path(a.scores).read_text())['results'] if a.scores else []
     # Validate all bound identities before writing any submitted result.
     packets,pending=run_assessments(con,v['id'],a.slug,submitted)
     write_json(base/'assessment-packet.json',{'schema_version':2,'prompt':v['prompt'],'icp':v['doc'],'profile_version':v['id'],'packets':pending})
     if a.dump:print(json.dumps({'prompt':v['prompt'],'icp':v['doc'],'packets':packets},indent=2))
     export(con,v['id'],a.slug,base)
+    if v['state']!='locked':print('Provisional only: this ICP has not completed two human-approved calibration rounds.')
     if pending:print(f'{len(pending)} assessments need evidence-bound semantic judgments; see assessment-packet.json')
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from .common import cli
+    cli(main)

@@ -1,7 +1,0 @@
-firecrawl-py
-openai
-pyyaml
-python-dotenv
-requests
-apify-client>=3.2.0
-typesafe-sdk>=0.7.1

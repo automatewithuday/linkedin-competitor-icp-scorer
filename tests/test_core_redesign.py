@@ -20,7 +20,7 @@ class CoreTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.root=Path(self.tmp.name);self.path=self.root/'ledger.sqlite'
         self.enterContext(patch.dict(os.environ,{'LEDGER_DB':str(self.path),'APIFY_TOKEN':'offline','CORE_RUN_SLUG':'test'}))
-        self.enterContext(contextlib.redirect_stdout(io.StringIO()))
+        self.out=io.StringIO();self.enterContext(contextlib.redirect_stdout(self.out))
         self.con=coredb.connect();self.addCleanup(self.con.close)
         self.doc={'schema_version':2,'name':'buyers','business':{'website':'https://seller.example','one_liner':'Sales software'},
             'segments':[{'id':'core','name':'Core buyers','company':[
@@ -92,12 +92,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(doc['segments'][0]['company'][0]['mode'],'preferred')
         self.assertEqual(doc['segments'][0]['company'][0]['value'],[50,2000])
 
-    def test_legacy_seed_never_automatically_becomes_approved_rules(self):
-        with self.assertRaisesRegex(ValueError,'interview seed'):
+    def test_old_style_icp_yaml_is_rejected_and_draft_icp_cannot_harvest(self):
+        with self.assertRaisesRegex(ValueError,'schema_version 2'):
             profiles.register(self.con,{'titles':['CEO'],'company_size':'50-2000'},self.profile_path)
         self.assertEqual(self.version()['state'],'draft')
-        with patch('sys.argv',['run.py','--slug','x','--icp',str(self.profile_path),'--post','https://linkedin.com/posts/x']),patch.object(core.subprocess,'run') as provider:
-            with self.assertRaises(SystemExit):pipeline.main()
+        with patch.object(core.subprocess,'run') as provider:
+            with self.assertRaisesRegex(ValueError,'not calibrated'):
+                core.main(['--slug','x','--icp',str(self.profile_path),'--post','https://linkedin.com/posts/x'])
         provider.assert_not_called()
 
     def test_calibration_needs_two_human_rounds_and_corrections_reset_streak(self):
@@ -297,11 +298,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.con.execute('PRAGMA foreign_key_check').fetchall(),[])
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM core_run_contacts').fetchone()[0],1)
 
-    def test_legacy_integrations_refuse_core_exports(self):
-        row={'schema_version':'2','icp_fit':'5','qualification_status':'qualified','ledger_status':'eligible'}
-        self.assertFalse(common.qualification_ok(row))
-        with self.assertRaisesRegex(ValueError,'legacy integration'):common.reject_core_exports([row])
-
     def test_suppression_and_campaign_history_remove_eligible_view_rows(self):
         self.lock_fixture();self.company();self.person();self.run_core()
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM qualified_leads').fetchone()[0],1)
@@ -452,5 +448,69 @@ class CoreTests(unittest.TestCase):
         coredb.import_saved(self.con,base)
         self.assertEqual(coredb.state(self.con,'person',cid)['facts']['current_roles'][0]['company'],'New Co')
         self.assertEqual(qualify.relationships(self.con,'history')[0]['role'],coredb.encode(newer['profile_evidence']['current_roles'][0]))
+
+    def test_qualify_cli_dump_works_on_a_saved_run_and_refuses_unknown_slugs(self):
+        self.company()
+        base=self.root/'cli';base.mkdir()
+        person={'id':'ACoAA1','name':'CLI Person','linkedinUrl':'https://www.linkedin.com/in/person1','position':'VP Sales',
+                'company':'Company 1','profile_evidence':{'current_roles':[{'title':'VP Sales','company':'Company 1','company_id':'1'}]}}
+        common.write_json(base/'engagers.json',[person]);common.write_json(base/'posts.json',[])
+        qualify.main(['--slug','cli','--icp',str(self.profile_path),'--output-dir',str(self.root),'--dump'])
+        packet=json.loads((base/'assessment-packet.json').read_text())
+        self.assertEqual(packet['icp']['name'],'buyers');self.assertIn('"packets"',self.out.getvalue())
+        self.assertEqual(len(common.read_csv(base/'all_leads.csv')[0]),1)
+        with self.assertRaisesRegex(ValueError,'No saved run'):
+            qualify.main(['--slug','missing','--icp',str(self.profile_path),'--output-dir',str(self.root),'--dump'])
+        with self.assertRaisesRegex(ValueError,'not found'):
+            qualify.main(['--slug','cli','--icp',str(self.root/'nope.yaml'),'--output-dir',str(self.root)])
+
+    def test_round_packet_shows_decisions_after_scoring(self):
+        rid=self.calibration(0)
+        packet=profiles.round_packet(self.con,rid)
+        self.assertEqual(len(packet['results']),10);self.assertEqual(packet['status'],'approved')
+        text=profiles.round_review(packet)
+        self.assertIn(packet['prompt'].splitlines()[0],text)
+        self.assertIn('not_qualified (confidence 1.0)',text);self.assertIn('Fictional structured industry',text)
+
+    def test_short_calibration_batch_is_reported_as_a_shortage(self):
+        cases=[{'company_id':self.company(300+i),'category':c} for i,c in enumerate(('likely_match','likely_non_match','edge_case'))]
+        with self.assertRaisesRegex(ValueError,'exactly 10 distinct companies.*3 supplied'):profiles.start_round(self.con,self.v['id'],cases)
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM calibration_rounds').fetchone()[0],0)
+
+    def test_abandoned_round_frees_its_companies(self):
+        cases=[{'company_id':self.company(400+i),'category':['likely_match','likely_non_match','edge_case'][i%3]} for i in range(10)]
+        rid=profiles.start_round(self.con,self.v['id'],cases)
+        profiles.main(['round','--round',str(rid),'--abandon','evidence changed'])
+        again=profiles.start_round(self.con,self.v['id'],cases)
+        self.assertNotEqual(again,rid)
+        self.assertIn('abandoned',self.out.getvalue())
+
+    def test_optional_skip_answers_are_stored_empty(self):
+        answers={'website':'https://seller.example','one_liner':'Sales software','best_customers':'Acme','segments':'Core',
+                 'segment:Core:titles':'VP Sales','segment:Core:titles:mode':'mandatory','segment:Core:industries':'Software',
+                 'segment:Core:industries:mode':'mandatory','offer':'skip','lead_magnet':'none','tone':'-','constraints':'Skip'}
+        doc=profiles.document_from_answers('x',answers)
+        self.assertEqual((doc['offer'],doc['tone'],doc['constraints']),({'cta':'','lead_magnet':''},'',''))
+        self.assertEqual(len(doc['segments'][0]['company']),1)
+
+    def test_dry_run_previews_harvest_caps_without_calls(self):
+        with patch.object(core.subprocess,'run') as provider,patch.object(harvest,'post_run') as post:
+            core.main(['--slug','preview','--icp',str(self.profile_path),'--output-dir',str(self.root),
+                       '--post','https://www.linkedin.com/posts/x','--sample','--dry-run'])
+        provider.assert_not_called();post.assert_not_called()
+        text=self.out.getvalue()
+        self.assertIn('hard cap $0.10',text);self.assertIn('up to 10 reactions and 0 comments',text);self.assertIn('No calls made',text)
+        self.assertIn('submission cap 10; total hard cap $0.25',text)
+
+    def test_ledger_mark_and_suppress_report_what_was_recorded(self):
+        csv=self.root/'leads.csv'
+        common.write_csv(csv,[{'linkedin_url':'https://www.linkedin.com/in/person1'},{'linkedin_url':''}],['linkedin_url'])
+        ledger.main(['--db',str(self.path),'mark','--campaign','c1','--status','imported','--csv',str(csv)])
+        self.assertIn('Marked 1 of 2',self.out.getvalue())
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM campaign_contacts').fetchone()[0],1)
+        with self.assertRaisesRegex(ValueError,'--url or --csv'):ledger.main(['--db',str(self.path),'mark','--campaign','c1','--status','failed'])
+        with self.assertRaisesRegex(ValueError,'needs'):ledger.main(['--db',str(self.path),'suppress','--reason','x'])
+        ledger.main(['--db',str(self.path),'stats'])
+        self.assertIn('qualified leads (current view)',self.out.getvalue())
 
 if __name__=='__main__':unittest.main()

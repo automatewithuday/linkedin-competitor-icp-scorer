@@ -1,16 +1,18 @@
 # Qualification core: operations
 
+All commands run through `uv run`. Nothing here calls a model API; judgments are made in the agent session.
+
 ## Setup and onboarding
 
 ```bash
 uv sync
 cp .env.example .env
-uv run setup_icp.py --profile my-buyers
+uv run python -m src.profiles intake --profile my-buyers
 ```
 
-Fill keys in your editor; never put them into chat or committed files. Only APIFY_TOKEN is required for collection. GETLEADS_API_KEY enables optional gap-filling. Scoring is performed by the agent in-session; no separate model API is called by the core.
+Fill keys in your editor; never put them into chat or committed files. Only APIFY_TOKEN is required for collection. GETLEADS_API_KEY enables optional gap-filling.
 
-The interview saves each answer in SQLite. Run the same command after interruption. Claude Code's `/setup` uses the same state:
+The interview saves each answer in SQLite, so an interrupted session resumes with the same command. Claude Code's `/setup` drives the same state one question at a time:
 
 ```bash
 uv run python -m src.profiles next-question --profile my-buyers
@@ -18,15 +20,9 @@ uv run python -m src.profiles answer --profile my-buyers --key one_liner --value
 uv run python -m src.profiles draft --profile my-buyers
 ```
 
-`draft` requires the interview to be complete. Each targeting condition needs an explicit mandatory/preferred/excluded mode. Optional outreach questions may be left empty. The agent may assemble richer conditions from confirmed answers with `setup_icp.py --profile my-buyers --document <yaml>`; this still saves a draft, not an approval. A website proposal must be confirmed, not automatically activated.
+`draft` requires the interview to be complete. Each targeting condition needs an explicit mandatory/preferred/excluded mode. Optional outreach questions accept `skip` and are stored empty. The agent may assemble richer conditions from confirmed answers and register them with `uv run python -m src.profiles intake --profile my-buyers --document <yaml>`; this still saves a draft, not an approval. A website proposal must be confirmed, not automatically activated.
 
-Existing configuration is an interview seed:
-
-```bash
-uv run setup_icp.py --profile my-buyers --seed icp.yaml
-```
-
-Profiles live at `profiles/<name>/client-profile.yaml`, with `icp-prompt.txt` and immutable version directories. One installation supports one business and multiple named ICPs. Data stays local and ignored by Git. [Example profile](../examples/client-profile.example.yaml).
+Profiles live at `profiles/<name>/client-profile.yaml`, with `icp-prompt.txt` and immutable version directories. One installation supports one business and multiple named ICPs. Data stays local and ignored by Git. [Example profile](../examples/client-profile.example.yaml). A pre-2.0 `icp.yaml` cannot be loaded; use it as a reminder while answering the interview.
 
 ## Criteria and signals
 
@@ -56,11 +52,11 @@ uv run python -m src.profiles round --round 1 --scores calibration-scores.json
 uv run python -m src.profiles round --round 1 --review
 ```
 
-The agent uses a subagent to score the packet in-session and shows the full prompt plus all 10 decisions and reasons. Calibration result JSON is `{"results": [{"company_id": 1, "score_context": "<copied>", "decision": "qualified", "confidence": 0.9, "reason": "...", "criterion_results": [...]}]}`. Company criteria use the semantic format below; structured conditions are checked by code. Do not fabricate company data or human approval.
+`start-round` prints the prompt, the profile, each company's observations and its `score_context`. The agent uses a subagent to score the packet in-session. After `--scores`, `round --round 1` prints the packet and a review block: the full prompt followed by every company's decision, confidence, reason and criterion results. Calibration result JSON is `{"results": [{"company_id": 1, "score_context": "<copied>", "decision": "qualified", "confidence": 0.9, "reason": "...", "criterion_results": [...]}]}`. Company criteria use the semantic format below; structured conditions are checked by code. Do not fabricate company data or human approval.
 
-Human review must be explicit. Agents may record actual user feedback with `round --round 1 --feedback feedback.json`, containing `reviewer: "human"`, `approved: true/false`, `corrections: []` and `human_message` containing the user's actual words. Silence is not approval. Corrections reset the streak. Two consecutive approved rounds with no corrections lock the version. Companies cannot repeat within that version's rounds. Rule/prompt changes create a draft version with no inherited approval. Feedback against stale evidence cannot lock a prompt. Use `round --round 1 --abandon 'Evidence changed'` to close an unfinished round.
+Human review must be explicit. `--review` shows the review block and asks the human at the terminal. Agents record actual user feedback with `round --round 1 --feedback feedback.json`, containing `reviewer: "human"`, `approved: true/false`, `corrections: []` and `human_message` with the user's actual words. Silence is not approval. Corrections reset the streak. Two consecutive approved rounds with no corrections lock the version. Companies cannot repeat within that version's reviewed rounds. Rule/prompt changes create a draft version with no inherited approval. Feedback against stale evidence cannot lock a prompt. `round --round 1 --abandon 'Evidence changed'` closes an unfinished round and frees its companies for a new one.
 
-If fewer than 10 suitable companies are available, keep the ICP provisional and report the shortage. Saved evidence can be used first; new sample collection needs authorized spending. Tests with fictional human feedback do not calibrate a real ICP.
+Fewer than 10 suitable companies is reported as a shortage and no round is opened: keep the ICP provisional, use saved evidence first, and collect more only with authorized spending. Tests with fictional human feedback do not calibrate a real ICP.
 
 ## Collect, qualify and export
 
@@ -70,9 +66,9 @@ uv run run.py --slug example-2026-10-20 \
   --post 'https://www.linkedin.com/posts/.../' --sample --dry-run
 ```
 
-A post link collects only that post. Use `--profile` for a personal profile's recent posts; company pages are not engagement targets. `--sample` allows provisional collection before calibration: at most 10 reactions and no comments on one post. Without `--sample`, a new harvest requires a locked ICP.
+A post link collects only that post. Use `--profile` for a personal profile's recent posts; company pages are not engagement targets. `--sample` allows provisional collection before calibration: one post, at most 10 reactions and no comments, capped at $0.10. Without `--sample`, a new harvest requires a locked ICP.
 
-Remove `--dry-run` for an authorized collection. Raw responses are persisted before parsing. Missing person URLs/current roles are resolved before companies. Company enrichment uses current employment IDs/URLs first and bounded name search only when needed; name-only matches never transfer account facts. Shared companies are enriched once. Complete search responses are reused. `--getleads` optionally fills required gaps through person LinkedIn URLs; company facts attach only with corroborated company identity/domain. Incidental emails remain separately stored and unverified.
+`--dry-run` prints what would be spent and makes no calls: the harvest limits and hard cap, then the profile and company lookup caps (with candidate counts once engagers are saved). Remove `--dry-run` for an authorized collection. Raw responses are persisted before parsing. Missing person URLs/current roles are resolved before companies. Company enrichment uses current employment IDs/URLs first and bounded name search only when needed; name-only matches never transfer account facts. Shared companies are enriched once. Complete search responses are reused. `--getleads` optionally fills required gaps through person LinkedIn URLs; company facts attach only with corroborated company identity/domain. Incidental emails remain separately stored and unverified.
 
 Default durable limits:
 
@@ -81,9 +77,9 @@ Default durable limits:
 | Engagement harvest | $1 combined hard cap; sample cap $0.10 |
 | Person/profile resolution | 10 lookups, $0.25 reserved hard cap total |
 | Company enrichment/search | 10 lookups, $0.25 reserved hard cap total |
-| GetLeads, when requested | 100 submitted identities per slug, shared with legacy submission history |
+| GetLeads, when requested | 100 submitted identities per slug |
 
-Override with `--harvest-max-usd`, `--profile-max-lookups`, `--profile-max-usd`, `--company-max-lookups`, `--company-max-usd`, and `--max-lookups`. Profile/company requests each reserve at most $0.02 within the total cap; actual provider charges and returned coverage may differ. `--dry-run` makes no provider/model calls. Unknown submissions require checking the provider before `--retry-unknown`; remote run IDs allow resuming a known run without paying for a new POST. Misses and completed provider responses are reused for 30 days. Failed/unknown submissions count toward persistent limits.
+Override with `--harvest-max-usd`, `--profile-max-lookups`, `--profile-max-usd`, `--company-max-lookups`, `--company-max-usd`, and `--max-lookups`. Profile/company requests each reserve at most $0.02 within the total cap; actual provider charges and returned coverage may differ. Unknown submissions require checking the provider before `--retry-unknown`; remote run IDs allow resuming a known run without paying for a new POST. Misses and completed provider responses are reused for 30 days. Failed/unknown submissions count toward persistent limits.
 
 For a strict offline replay, disable enrichment explicitly:
 
@@ -99,11 +95,11 @@ uv run run.py --slug saved-run --icp profiles/my-buyers/client-profile.yaml \
 `output/<slug>/assessment-packet.json` contains pending entities, criteria, observations, dependencies and score_context. Judge companies first; people are emitted only after their company qualifies in that segment. Submit partial, current judgments, rerun, then judge newly eligible people:
 
 ```bash
-uv run run.py --slug saved-run --icp profiles/my-buyers/client-profile.yaml \
-  --skip-harvest --no-resolve --no-enrich --scores scores.json
+uv run python -m src.qualify --slug saved-run --icp profiles/my-buyers/client-profile.yaml --dump
+uv run python -m src.qualify --slug saved-run --icp profiles/my-buyers/client-profile.yaml --scores scores.json
 ```
 
-A result in `{"results": [...]}` has this shape:
+`src.qualify` works on any saved slug without paid stages; the run.py form with `--skip-harvest --no-resolve --no-enrich` is equivalent. A result in `{"results": [...]}` has this shape:
 
 ```json
 {
@@ -126,28 +122,40 @@ A result in `{"results": [...]}` has this shape:
 }
 ```
 
-Use only IDs/quotes actually supplied. Person results use the person entity ID and employment_id from the packet. Criterion IDs, entity IDs, employment, segment and score_context must all agree. Semantic outcomes are `match`, `no_match` or `unknown`. A confidence below 0.6 requires review. Code checks structured conditions and rejects verdicts that contradict mandatory evidence. Preferred criterion matches and fresh optional signals each add one point to priority_score, ordering leads within their decision group. Numeric scores are not qualification gates. No separate model API is invoked.
+Use only IDs/quotes actually supplied. Person results use the person entity ID and employment_id from the packet. Criterion IDs, entity IDs, employment, segment and score_context must all agree. Semantic outcomes are `match`, `no_match` or `unknown`. A confidence below 0.6 requires review. Code checks structured conditions and rejects verdicts that contradict mandatory evidence. Preferred criterion matches and fresh optional signals each add one point to priority_score, ordering leads within their decision group. Numeric scores are not qualification gates.
 
-`src/rank.py --icp <profile> --slug <slug> --dump` is an equivalent scoring entrypoint. For a completed core run it can find the profile from core-run.json. `src/enrich.py --icp <profile> --slug <slug> --dry-run` previews the company stage.
+`uv run src/enrich.py --icp <profile> --slug <slug> --dry-run` previews the company stage on its own.
 
 ### Outputs
 
-- `all_leads.csv`: one selected company/employment/segment per engager, with company/person/overall decisions, separate reasons, eligibility, profile version, context and observation references. `employment_decisions` retains other current role/segment assessments. An eligible match takes precedence when several roles qualify.
+- `all_leads.csv`: one selected company/employment/segment per engager, with company/person/overall decisions, separate reasons, eligibility, profile version, context and observation references. `employment_decisions` retains other current role/segment assessments. An eligible match takes precedence when several roles qualify. Columns are listed in [SCHEMAS.md](SCHEMAS.md).
 - `qualified_leads.csv`: only current, locked-ICP, fully qualified and unsuppressed people. Uncalibrated results never appear here.
 - `assessment-packet.json`: pending semantic work; `core-run.json`: profile/version receipt.
-- Chat summary: all decision counts, eligible count, names and missing evidence. `src/summary.py --input <csv>` also supports core exports.
+- Chat summary: `uv run src/summary.py --input output/<slug>/all_leads.csv` prints decision counts, the eligible count and every person's company/person reasons.
 
-Known campaign imports, suppressions and opt-outs still block eligibility. Rejections and review holds are retained. CSV files are snapshots: re-export after evidence, rule or prompt changes. Legacy integrations refuse schema_version=2, so these exports cannot trigger sending through old campaign commands.
+Known campaign history, suppressions and opt-outs still block eligibility. Rejections and review holds are retained. CSV files are snapshots: re-export after evidence, rule or prompt changes.
+
+## Ledger: suppressions and outreach history
+
+```bash
+uv run src/ledger.py suppress --domain customer.example --reason customer
+uv run src/ledger.py suppress --csv teammates.csv --reason teammate
+uv run src/ledger.py mark --campaign q4-sequence --status contacted --csv sent.csv
+uv run src/ledger.py mark --campaign q4-sequence --status replied --url https://www.linkedin.com/in/example
+uv run src/ledger.py stats
+```
+
+`suppress` takes a URL, email, domain or a CSV with `linkedin_url`/`email` columns. `mark` records what was sent or answered outside this tool; statuses are contacted, replied, excluded, imported and failed, and a later `failed` never overrides a confirmed import or reply. Both commands print how many people were actually recorded. Anyone suppressed or in a campaign drops out of `qualified_leads` immediately.
 
 ## SQLite and migration
 
-Default database: `data/ledger.sqlite`; override with `LEDGER_DB`. The first core upgrade creates `ledger.sqlite.before-core-v2.sqlite` using SQLite backup. Original tables/files remain intact.
+Default database: `data/ledger.sqlite`; override with `LEDGER_DB`. The first core upgrade creates `ledger.sqlite.before-core-v2.sqlite` using SQLite backup. Original tables remain intact.
 
 ```bash
 uv run run.py --slug saved-run --migrate --output-dir ./output
 ```
 
-This imports available raw reactions/comments, normalized engager/post files and prior provider caches offline. Full raw files are marked `full`; normalized-only legacy records are explicitly marked `normalized_only`. Missing historical raw responses are not recreated or re-purchased. Imported records retain original metadata when present; migration timestamps do not establish event dates.
+This imports available raw reactions/comments, normalized engager/post files and prior provider caches offline. Full raw files are marked `full`; normalized-only records are explicitly marked `normalized_only`. Missing historical raw responses are not recreated or re-purchased. Imported records retain original metadata when present; migration timestamps do not establish event dates.
 
 The connected layers are:
 
@@ -163,10 +171,10 @@ provider_requests → raw_records (immutable)
 
 `apify_records` and `getleads_records` are separate provider views over the same evidence store. Normalized records can reference their original raw source. Employment and assessment dependencies prevent old-employer facts or stale scores from qualifying a person. Raw data and assessments remain available after rejection, restart or rule changes. Signal event dates, collection dates, incidental emails and campaign history stay separate from fit evidence.
 
-## Validation and archived integrations
+## Validation
 
 ```bash
-uv run --extra legacy python -m unittest discover -s tests -v
+uv run python -m unittest discover -s tests -v
 ```
 
-The optional `legacy` dependency group supports the retained integrations and their regression tests. Default installation uses only requests, PyYAML and python-dotenv. Active research, email discovery/verification, Jev Activity Intel through TypeSafe, drafts, Supabase and campaign imports are outside this core release. The historical commands remain documented in [legacy operations](LEGACY_OPERATIONS.md); run.py/rank.py/enrich.py/setup_icp.py require explicit `--legacy` for that archived path. Never use it to bypass core calibration or review holds.
+The tests run offline with fictional fixtures and need only requests, PyYAML and python-dotenv. They exercise the software; they never calibrate a real ICP.

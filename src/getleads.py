@@ -1,23 +1,21 @@
-"""Selective ICP evidence enrichment. Apify collects engagement; GetLeads fills buyer-data gaps.
+"""GetLeads evidence gap-filling for the company stage. Uses plan credits, not the paid scraping product.
 
-Uses plan credits, NOT the $0.012/engager scraping product. Optional email discovery shares this cache.
-Public LinkedIn URLs only; no name matching. Results and submission attempts are shared in SQLite.
+Public LinkedIn URLs only; no name matching. Raw responses go to the evidence store before parsing. Results and
+submission attempts are shared in SQLite, so a URL is never paid for twice within CACHE_DAYS.
 """
-import argparse
 import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
 try:
     from . import ledger
-    from .common import fit, linkedin_url, read_csv, valid_email, write_json
+    from .common import linkedin_url, valid_email
 except ImportError:
     import ledger
-    from common import fit, linkedin_url, read_csv, valid_email, write_json
+    from common import linkedin_url, valid_email
 
 BASE_URL = 'https://app.getleads.io/api/v1'
 BATCH_SIZE = 25
@@ -138,27 +136,6 @@ def enrich_batch(urls, key):
     return out
 
 
-def missing_evidence(e, icp):
-    try:
-        from .evidence import scoring_enrichment
-    except ImportError:
-        from evidence import scoring_enrichment
-    enriched, _ = scoring_enrichment(e)
-    roles = (e.get('profile_evidence') or {}).get('current_roles') or []
-    title = roles[0].get('title') if roles else ''
-    missing = []
-    for field, present in (
-        ('title', title or e.get('position') or enriched.get('title')),
-        ('company', e.get('company') or enriched.get('company')),
-        ('location', not icp.get('geos') or e.get('location') or enriched.get('person_location') or enriched.get('person_country')),
-        ('industry', not (icp.get('industries') or icp.get('industries_out')) or enriched.get('company_industry')),
-        ('company_size', not icp.get('size_range') or enriched.get('company_size')),
-    ):
-        if not present:
-            missing.append(field)
-    return missing
-
-
 def cached(con, url):
     row = con.execute('SELECT * FROM provider_enrichments WHERE provider=? AND identity=?', (PROVIDER, url)).fetchone()
     return dict(row) if row else None
@@ -171,13 +148,6 @@ def fresh(hit, days, require_email=False):
         return False  # older caches discarded email fields; they cannot certify that no email was found
     age = (datetime.now(timezone.utc) - datetime.fromisoformat(hit['checked_at'])).total_seconds()
     return 0 <= age < days * 86400
-
-
-def apply(e, data, checked_at):
-    # Keep Apify evidence intact. Conflicting employers stay visible as separately sourced evidence.
-    facts = {k: data.get(k) or '' for k in FIELDS}
-    if any(facts.values()):
-        e['icp_enrichment'] = {**facts, 'source': PROVIDER, 'checked_at': checked_at}
 
 
 def reserve(con, urls, slug, max_lookups, cache_days, retry_unknown, require_email=False):
@@ -209,7 +179,7 @@ def reserve(con, urls, slug, max_lookups, cache_days, retry_unknown, require_ema
 
 
 def fetch_reserved(con, attempts, key):
-    """Complete a previously committed claim; used by both ICP enrichment and email discovery."""
+    """Complete a previously committed claim."""
     stamp = ledger.now()
     try:
         results = enrich_batch(list(attempts), key)
@@ -228,147 +198,3 @@ def fetch_reserved(con, attempts, key):
         hits[url] = cached(con, url)
     con.commit()
     return hits, None
-
-
-def enrich_harvest(base, min_fit=3, max_lookups=100, dry_run=False, cache_days=CACHE_DAYS, retry_unknown=False):
-    base = Path(base)
-    engagers = json.loads((base / 'engagers.json').read_text())
-    icp = json.loads((base / 'recipient_icp.json').read_text())
-    rows, _ = read_csv(base / 'ranked_engagers.csv')
-    fits = {r.get('actor_id'): fit(r) for r in rows}
-    todo, changed, held = {}, [], []
-    with ledger.connect() as con:
-        before = [ledger.evidence_hash(e) for e in engagers]
-        used = con.execute('SELECT COUNT(*) FROM enrichment_attempts WHERE provider=? AND slug=?',
-                           (PROVIDER, base.name)).fetchone()[0]
-        for i, e in enumerate(engagers):
-            url = linkedin_url(e.get('linkedinUrl'))
-            hit = cached(con, url) if url else None
-            # A later rejection does not erase the fact that this person was already looked up.
-            e['getleads_status'] = hit['status'] if hit and hit['status'] in ('matched', 'not_found') else 'below_min_fit'
-            if hit:
-                e['getleads_checked_at'] = hit['checked_at']
-            if fits.get(e.get('id'), 0) < min_fit:
-                continue
-            e['getleads_status'] = 'missing_public_url'
-            if not url:
-                continue
-            status = ledger.status_for(con, ledger.aliases_of(e))
-            e['getleads_status'] = status
-            if status != 'eligible':
-                continue
-            if hit and hit['status'] == 'matched':
-                apply(e, json.loads(hit['data']), hit['checked_at'])
-            if fresh(hit, cache_days):
-                e['getleads_status'] = hit['status']
-                continue  # both misses and partial matches consume credits; reuse either for 30 days
-            if not missing_evidence(e, icp) and not hit:
-                e['getleads_status'] = 'not_needed'
-                continue
-            if hit and hit['status'] in ('pending', 'unknown') and not retry_unknown:
-                e['getleads_status'] = hit['status']
-                held.append(url)
-                continue
-            e['getleads_status'] = 'lookup_limit_reached'
-            todo.setdefault(url, []).append(i)
-
-        candidates = len(todo)
-        urls = list(todo)[:max(0, max_lookups - used)]
-        print(f'GetLeads: {candidates} identities need lookup; {len(urls)} planned; '
-              f'{used}/{max_lookups} submissions already recorded for this slug. '
-              f'At most {len(urls)} plan credits (misses included in budget), or included fair-use rows; no wallet scrape.')
-        if held:
-            print(f'GetLeads: {len(held)} pending/unknown submissions held; check the provider before --retry-unknown.')
-        if dry_run:
-            print('Dry run: no account/enrichment API calls or evidence changes. Account allowance checked on execution.')
-            return [], bool(held)
-
-        def checkpoint():
-            for index, person in enumerate(engagers):
-                evidence_changed = ledger.evidence_hash(person) != before[index]
-                if evidence_changed or person.get('icp_enrichment'):
-                    cid, _ = ledger.contact_for(con, ledger.aliases_of(person), person.get('name'), base.name)
-                    ledger.snapshot(con, cid, person, PROVIDER)
-                if evidence_changed:
-                    if index not in changed:
-                        changed.append(index)
-                    ledger.touch_evidence(con, cid, person)
-            con.commit()
-            write_json(base / 'engagers.json', engagers)
-
-        checkpoint()  # cache replay can itself invalidate earlier scores
-        if not urls:
-            return changed, bool(held)
-        key = os.getenv('GETLEADS_API_KEY')
-        if not key:
-            raise ProviderError('Set GETLEADS_API_KEY in .env; no enrichment submitted.')
-        remaining, kind = allowance(key)
-        print(f'GetLeads allowance: {remaining if remaining is not None else "exempt"} {kind}.')
-        if remaining is not None and remaining < len(urls):
-            raise ProviderError('Insufficient GetLeads allowance for the planned batch; lower --max-lookups or wait for reset.')
-        for start in range(0, len(urls), BATCH_SIZE):
-            chunk = urls[start:start + BATCH_SIZE]
-            # Commit BEFORE submitting. Process interruption cannot silently repeat a charged batch.
-            attempt_ids, reused, concurrent = reserve(con, chunk, base.name, max_lookups, cache_days, retry_unknown)
-            held.extend(concurrent)
-            for url, hit in reused.items():
-                for i in todo[url]:
-                    engagers[i]['getleads_status'] = hit['status']
-                    engagers[i]['getleads_checked_at'] = hit['checked_at']
-                    if hit['status'] == 'matched':
-                        apply(engagers[i], json.loads(hit['data']), hit['checked_at'])
-            for url in concurrent:
-                for i in todo[url]:
-                    engagers[i]['getleads_status'] = 'pending_or_unknown'
-            checkpoint()
-            chunk = list(attempt_ids)
-            if not chunk:
-                continue
-            hits, exc = fetch_reserved(con, attempt_ids, key)
-            if exc:
-                status = 'unknown' if exc.unknown else 'error'
-                for url in chunk:
-                    for i in todo[url]:
-                        engagers[i]['getleads_status'] = status
-                checkpoint()
-                print(str(exc))
-                return changed, True
-            for url, hit in hits.items():
-                for i in todo[url]:
-                    engagers[i]['getleads_status'] = hit['status']
-                    engagers[i]['getleads_checked_at'] = hit['checked_at']
-                if hit['status'] == 'matched':
-                    for i in todo[url]:
-                        apply(engagers[i], json.loads(hit['data']), hit['checked_at'])
-            checkpoint()
-            print(f'GetLeads batch: {len(chunk)} submitted; {sum(h["status"] == "matched" for h in hits.values())} matched.')
-        return changed, bool(held)
-
-
-def main():
-    load_dotenv()
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--slug', required=True)
-    ap.add_argument('--output-dir', default='./output')
-    ap.add_argument('--min-fit', type=int, choices=range(1, 6), default=3)
-    ap.add_argument('--max-lookups', type=int, default=100, help='Total submission cap per slug, including retries')
-    ap.add_argument('--cache-days', type=int, default=CACHE_DAYS)
-    ap.add_argument('--dry-run', action='store_true')
-    ap.add_argument('--retry-unknown', action='store_true', help='Explicitly retry unknown submissions after provider review; may cost again')
-    args = ap.parse_args()
-    if args.max_lookups < 1 or args.cache_days < 1:
-        ap.error('Lookup cap and cache days must be positive')
-    try:
-        changed, failed = enrich_harvest(Path(args.output_dir) / args.slug, args.min_fit, args.max_lookups,
-                                        args.dry_run, args.cache_days, args.retry_unknown)
-    except ProviderError as exc:
-        print(str(exc))
-        raise SystemExit(3) from None
-    if changed:
-        print(f'ICP evidence changed for indices {changed}; rescore with rank.py --dump before exports.')
-    if failed and not args.dry_run:
-        raise SystemExit(3)
-
-
-if __name__ == '__main__':
-    main()

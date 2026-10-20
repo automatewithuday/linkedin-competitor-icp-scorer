@@ -10,15 +10,17 @@ from . import coredb, ledger
 from .common import atomic_text
 
 SCHEMA_VERSION=2
+ROUND_SIZE=10
+SKIP=('skip','none','-','')
 BASE_QUESTIONS=[
  ('website','Business website (or describe the business if there is no website)'),
  ('one_liner','What do you sell, in one sentence?'),
  ('best_customers','Name your best customer, or up to three good examples'),
  ('segments','Name the distinct buyer/partner segments (comma-separated; e.g. Core buyers, Agency partners)'),
- ('offer','What is the offer or call to action? Optional'),
- ('lead_magnet','What can you give away? Optional'),
- ('tone','Preferred tone? Optional'),
- ('constraints','Banned language or other constraints? Optional'),
+ ('offer','What is the offer or call to action? Optional (skip to leave empty)'),
+ ('lead_magnet','What can you give away? Optional (skip to leave empty)'),
+ ('tone','Preferred tone? Optional (skip to leave empty)'),
+ ('constraints','Banned language or other constraints? Optional (skip to leave empty)'),
 ]
 TARGET_QUESTIONS=[
  ('business_model','company','description','Describe the companies that buy this and why; include business model'),
@@ -52,14 +54,19 @@ def split(value):
     return [v.strip() for v in re.split('[,;]',value or '') if v.strip()]
 
 
+def opt(value):
+    """An optional answer: 'skip', 'none' or '-' means empty, never a literal constraint."""
+    value=(value or '').strip()
+    return '' if value.lower() in SKIP else value
+
+
 def queue(answers):
     result=[(k,q) for k,q in BASE_QUESTIONS[:4]]
     for name in split(answers.get('segments') or 'Core buyers'):
         prefix='segment:'+name+':'
         for key,scope,field,prompt in TARGET_QUESTIONS:
             result.append((prefix+key,f'{name}: {prompt}'))
-            value=answers.get(prefix+key)
-            if value and value.lower() not in ('skip','none','-'):
+            if opt(answers.get(prefix+key)):
                 result.append((prefix+key+':mode',f'{name}, {key}: mandatory, preferred or excluded? If everything else matched, would you still contact them?'))
         result.extend([(prefix+'signals',f'{name}: timing signals to prioritize (comma-separated; or skip)'),
                        (prefix+'signal_days',f'{name}: signal freshness window in days (default 90)'),
@@ -93,8 +100,8 @@ def document_from_answers(name, answers):
         prefix='segment:'+label+':'
         segment={'id':f'segment-{i+1}','name':label,'company':[],'person':[],'signals':[]}
         for key,scope,field,_ in TARGET_QUESTIONS:
-            val=answers.get(prefix+key,'').strip()
-            if not val or val.lower() in ('skip','none','-'):
+            val=opt(answers.get(prefix+key))
+            if not val:
                 continue
             mode=answers.get(prefix+key+':mode')
             op='semantic';value=val
@@ -105,11 +112,11 @@ def document_from_answers(name, answers):
             segment[scope].append({'id':f'{segment["id"]}:{key}','field':field,'operator':op,
                                    'value':value,'mode':mode,'description':val})
         try:
-            days=int(answers.get(prefix+'signal_days') or '90')
+            days=int(opt(answers.get(prefix+'signal_days')) or '90')
         except ValueError:
             raise ValueError('Signal freshness must be a positive number of days') from None
-        required=set(split(answers.get(prefix+'required_signals')))-{'skip','none','-'}
-        events=[e for e in split(answers.get(prefix+'signals')) if e.lower() not in ('skip','none','-')]
+        required={v for v in split(answers.get(prefix+'required_signals')) if v.lower() not in SKIP}
+        events=[e for e in split(answers.get(prefix+'signals')) if e.lower() not in SKIP]
         if required-set(events):
             raise ValueError('Required signals must be among the explicitly defined signals')
         for j,event in enumerate(events):
@@ -120,13 +127,14 @@ def document_from_answers(name, answers):
     website=answers.get('website','')
     return {'schema_version':2,'name':name,'business':{'website':website if website.startswith(('http://','https://')) else '',
              'description':website,'one_liner':answers.get('one_liner',''),'best_customers':split(answers.get('best_customers'))},
-            'segments':segments,'offer':{'cta':answers.get('offer',''),'lead_magnet':answers.get('lead_magnet','')},
-            'tone':answers.get('tone',''),'constraints':answers.get('constraints','')}
+            'segments':segments,'offer':{'cta':opt(answers.get('offer')),'lead_magnet':opt(answers.get('lead_magnet'))},
+            'tone':opt(answers.get('tone')),'constraints':opt(answers.get('constraints'))}
 
 
 def validate(doc):
     if not isinstance(doc,dict) or doc.get('schema_version')!=2:
-        raise ValueError('Legacy ICP is an interview seed, not approved rules. Run setup_icp.py --seed icp.yaml')
+        raise ValueError('Not a qualification profile (schema_version 2). Write one with the interview: '
+                         'python -m src.profiles draft --profile <name>')
     slug(doc.get('name'))
     if not isinstance(doc.get('business'),dict) or not doc['business'].get('one_liner'):
         raise ValueError('The business and what it sells must be defined')
@@ -198,15 +206,18 @@ def _start_round(con,version_id,cases):
     v=con.execute('SELECT * FROM core_icp_versions WHERE id=?',(version_id,)).fetchone()
     if not v or con.execute('SELECT current_version FROM icp_profiles WHERE name=?',(v['profile'],)).fetchone()[0]!=version_id:
         raise ValueError('Select the current ICP version')
-    if len(cases)!=10 or len({c['company_id'] for c in cases})!=10:
-        raise ValueError('Each calibration round needs exactly 10 distinct companies')
+    distinct={c['company_id'] for c in cases}
+    if len(cases)!=ROUND_SIZE or len(distinct)!=ROUND_SIZE:
+        raise ValueError(f'Calibration needs exactly {ROUND_SIZE} distinct companies with saved evidence; {len(distinct)} supplied. '
+                         'Collect more (a --sample run or another post) and keep qualification provisional until then.')
     if not {'likely_match','likely_non_match','edge_case'} <= {c.get('category') for c in cases}:
         raise ValueError('Include likely matches, non-matches and edge cases')
     previous=con.execute('SELECT * FROM calibration_rounds WHERE profile_version=?',(version_id,)).fetchall()
     if any(r['status'] in ('pending','scored') for r in previous):
         raise ValueError('Finish the pending human review before starting another round')
-    used={c['company_id'] for r in previous for c in json.loads(r['cases'])}
-    if used & {c['company_id'] for c in cases}:
+    # Abandoned rounds never reached review, so their companies may be used again.
+    used={c['company_id'] for r in previous if r['status']!='abandoned' for c in json.loads(r['cases'])}
+    if used & distinct:
         raise ValueError('Use a new batch: companies cannot repeat within a prompt version')
     contexts={}
     for case in cases:
@@ -220,13 +231,27 @@ def _start_round(con,version_id,cases):
 
 
 def round_packet(con,rid):
+    """Prompt, ICP, the 10 cases with their evidence and, once scored, the submitted results."""
     r=con.execute('SELECT * FROM calibration_rounds WHERE id=?',(rid,)).fetchone()
     if not r:raise ValueError('Unknown calibration round')
     v=con.execute('SELECT * FROM core_icp_versions WHERE id=?',(r['profile_version'],)).fetchone()
     contexts=json.loads(r['contexts'])
-    return {'round_id':rid,'prompt':v['prompt'],'icp':json.loads(v['document']),'cases':[
+    return {'round_id':rid,'status':r['status'],'prompt':v['prompt'],'icp':json.loads(v['document']),'cases':[
         {**c,'score_context':contexts[str(c['company_id'])],'evidence':coredb.state(con,'company',c['company_id'])}
-        for c in json.loads(r['cases'])]}
+        for c in json.loads(r['cases'])],'results':json.loads(r['results']) if r['results'] else []}
+
+
+def round_review(packet):
+    """Human-readable review text: the full prompt, then one line per company decision."""
+    names={c['company_id']:(c.get('evidence') or {}).get('facts',{}).get('name','?') for c in packet['cases']}
+    lines=[f"Round {packet['round_id']} ({packet['status']})",'--- prompt ---',packet['prompt'].rstrip(),'--- decisions ---']
+    if not packet['results']:
+        lines.append('(not scored yet)')
+    for x in packet['results']:
+        lines.append(f"{x['company_id']} {names.get(x['company_id'],'?')}: {x['decision']} (confidence {x['confidence']}) — {x['reason']}")
+        for j in x.get('criterion_results') or []:
+            lines.append(f"    {j.get('criterion_id')}: {j.get('outcome')} ({j.get('confidence')}) — {j.get('reason')}")
+    return '\n'.join(lines)
 
 
 def _submit_round(con,rid,results):
@@ -234,21 +259,21 @@ def _submit_round(con,rid,results):
     packet=round_packet(con,rid)
     if r['status']!='pending':raise ValueError('Round has already been scored')
     expected={c['company_id']:c for c in packet['cases']}
-    if len(results)!=10 or {x.get('company_id') for x in results}!=set(expected):
-        raise ValueError('Score all 10 companies exactly once')
+    if len(results)!=ROUND_SIZE or {x.get('company_id') for x in results}!=set(expected):
+        raise ValueError(f'Score all {ROUND_SIZE} companies exactly once')
     for result in results:
         c=expected[result['company_id']]
         if result.get('score_context')!=c['score_context'] or not result.get('reason'):
-            raise ValueError('Calibration judgment is unbound or lacks an explanation')
+            raise ValueError(f"Calibration judgment for company {result['company_id']} is unbound or lacks an explanation")
         if result.get('decision') not in ('qualified','not_qualified','needs_review') or type(result.get('confidence')) not in (float,int) or not 0<=result['confidence']<=1:
-            raise ValueError('Invalid calibration verdict/confidence')
+            raise ValueError(f"Invalid calibration verdict/confidence for company {result['company_id']}")
         if result['decision']=='qualified' and result['confidence']<0.6:
-            raise ValueError('Low-confidence calibration matches require review')
+            raise ValueError(f"Low-confidence calibration match for company {result['company_id']} requires review")
         # Check that the evidence and prompt did not change between dump and submission.
         v=con.execute('SELECT * FROM core_icp_versions WHERE id=?',(r['profile_version'],)).fetchone()
         current=coredb.state(con,'company',result['company_id'])
         if coredb.fingerprint([v['hash'],v['prompt_hash'],result['company_id'],current['hash']])!=c['score_context']:
-            raise ValueError('Company evidence changed; start a fresh calibration round')
+            raise ValueError(f"Evidence for company {result['company_id']} changed; start a fresh calibration round")
     from . import qualify
     doc=json.loads(v['document'])
     for result in results:
@@ -256,7 +281,7 @@ def _submit_round(con,rid,results):
         judgments=result.get('criterion_results') or []
         all_ids={c['id'] for seg in doc['segments'] for c in seg['company']}
         if len({j.get('criterion_id') for j in judgments})!=len(judgments) or any(j.get('criterion_id') not in all_ids for j in judgments):
-            raise ValueError('Calibration criterion results must identify supplied company criteria')
+            raise ValueError(f"Criterion results for company {result['company_id']} must identify supplied company criteria")
         for seg in doc['segments']:
             ids={c['id'] for c in seg['company']}
             assessed=qualify.evaluate(seg['company'],evidence['facts'],[evidence['id']],[j for j in judgments if j.get('criterion_id') in ids])
@@ -265,7 +290,8 @@ def _submit_round(con,rid,results):
             decisions.append(assessed['decision'])
         decision='qualified' if 'qualified' in decisions else 'not_qualified' if all(d=='not_qualified' for d in decisions) else 'needs_review'
         if decision=='qualified' and result['confidence']<0.6:decision='needs_review'
-        if decision!=result['decision']:raise ValueError('Calibration verdict contradicts required company criteria')
+        if decision!=result['decision']:
+            raise ValueError(f"Verdict for company {result['company_id']} ({result['decision']}) contradicts the required company criteria ({decision})")
     con.execute("UPDATE calibration_rounds SET results=?,status='scored' WHERE id=?",(coredb.encode(results),rid));con.commit()
 
 
@@ -311,9 +337,9 @@ def review_round(con,rid,approved,corrections,reviewer,human_message=None):
 def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     sub=ap.add_subparsers(dest='command',required=True)
-    p=sub.add_parser('intake');p.add_argument('--profile',default='default');p.add_argument('--output');p.add_argument('--seed');p.add_argument('--document')
-    p=sub.add_parser('start-round');p.add_argument('--icp',required=True);p.add_argument('--cases',required=True)
-    p=sub.add_parser('round');p.add_argument('--round',type=int,required=True);p.add_argument('--scores');p.add_argument('--review',action='store_true');p.add_argument('--feedback');p.add_argument('--abandon')
+    p=sub.add_parser('intake',help='interactive interview; or --document to register a hand-edited draft');p.add_argument('--profile',default='default');p.add_argument('--output');p.add_argument('--document')
+    p=sub.add_parser('start-round',help='open a calibration round over 10 saved companies');p.add_argument('--icp',required=True);p.add_argument('--cases',required=True)
+    p=sub.add_parser('round',help='submit scores, show decisions, record human feedback or abandon');p.add_argument('--round',type=int,required=True);p.add_argument('--scores');p.add_argument('--review',action='store_true');p.add_argument('--feedback');p.add_argument('--abandon')
     for command in ('next-question','answer','draft'):
         p=sub.add_parser(command);p.add_argument('--profile',required=True);p.add_argument('--output')
         if command=='answer':
@@ -332,11 +358,6 @@ def main(argv=None):
         slug(a.profile);path=Path(a.output or f'profiles/{a.profile}/client-profile.yaml')
         if a.document:
             doc=yaml.safe_load(Path(a.document).read_text());write_profile(con,doc,path);print('Draft profile saved:',path);return
-        if a.seed and not con.execute('SELECT 1 FROM intake_sessions WHERE profile=?',(a.profile,)).fetchone():
-            seed=yaml.safe_load(Path(a.seed).read_text()) or {}
-            answers={'one_liner':seed.get('summary') or '', 'legacy_proposal':seed}
-            con.execute('INSERT INTO intake_sessions VALUES (?,?,?)',(a.profile,coredb.encode(answers),ledger.now()));con.commit()
-            print('Legacy values are proposals only. Confirm targeting and modes question by question.')
         try:
             while (question:=next_question(con,a.profile)):
                 key,prompt=question
@@ -353,6 +374,8 @@ def main(argv=None):
         write_profile(con,doc,path)
         print('Saved:',path)
     elif a.command=='start-round':
+        if not Path(a.icp).is_file():raise ValueError(f'ICP profile not found: {a.icp}')
+        if not Path(a.cases).is_file():raise ValueError(f'Cases file not found: {a.cases}')
         v=load(con,a.icp);rid=start_round(con,v['id'],json.loads(Path(a.cases).read_text()))
         print(coredb.encode(round_packet(con,rid)))
     else:
@@ -360,18 +383,32 @@ def main(argv=None):
             r=con.execute('SELECT profile_version,status FROM calibration_rounds WHERE id=?',(a.round,)).fetchone()
             if not r or r['status'] not in ('pending','scored'):raise ValueError('Only an unfinished round can be abandoned')
             con.execute("UPDATE calibration_rounds SET status='abandoned',feedback=? WHERE id=?",(coredb.encode({'reason':a.abandon}),a.round))
-            con.execute("UPDATE core_icp_versions SET state='calibrating',approval_streak=0 WHERE id=?",(r['profile_version'],));con.commit();return
+            con.execute("UPDATE core_icp_versions SET state='calibrating',approval_streak=0 WHERE id=?",(r['profile_version'],));con.commit()
+            print(f'Round {a.round} abandoned; its companies may be used in a new round.');return
         if a.feedback:
+            if not Path(a.feedback).is_file():raise ValueError(f'Feedback file not found: {a.feedback}')
             feedback=json.loads(Path(a.feedback).read_text())
             review_round(con,a.round,feedback['approved'],feedback.get('corrections',[]),feedback['reviewer'],feedback.get('human_message'))
-        if a.scores:submit_round(con,a.round,json.loads(Path(a.scores).read_text())['results'])
-        print(json.dumps(round_packet(con,a.round),indent=2))
+            print('Human feedback recorded.')
+        if a.scores:
+            if not Path(a.scores).is_file():raise ValueError(f'Scores file not found: {a.scores}')
+            submit_round(con,a.round,json.loads(Path(a.scores).read_text())['results'])
+        packet=round_packet(con,a.round)
         if a.review:
-            print('Review the full prompt, all 10 decisions and their reasons. Agents must wait for actual human feedback.')
-            human_message=input('Human reviewer: type approved, or corrections\n> ').strip()
+            print(round_review(packet))
+            print('\nAgents must wait for actual human feedback. Human reviewer: type approved, or describe corrections.')
+            try:
+                human_message=input('> ').strip()
+                corrections=input('Corrections (leave empty only if none):\n> ').strip()
+            except EOFError:
+                raise ValueError('No interactive input available; record the human answer with --feedback <json> instead') from None
             approved=human_message=='approved'
-            corrections=input('Corrections (leave empty only if none):\n> ').strip()
             review_round(con,a.round,approved,[corrections] if corrections else [],'human',human_message+' '+corrections)
             print('Human feedback recorded.')
+        else:
+            print(json.dumps(packet,indent=2))
+            if packet['results']:print('\n'+round_review(packet))
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from .common import cli
+    cli(main)

@@ -1,4 +1,4 @@
-"""SQLite evidence store for the qualification core. Legacy ledger tables remain intact."""
+"""SQLite evidence store for the qualification core, layered on the person ledger in ledger.py."""
 import hashlib
 import json
 import os
@@ -251,7 +251,7 @@ def ingest_person(con, slug, e, raw_id):
 
 
 def import_saved(con, base):
-    """Offline, idempotent import. Never pretend normalized legacy files are full raw responses."""
+    """Offline, idempotent import of output/<slug> files. Normalized files are labelled normalized_only, never full raw responses."""
     from . import harvest
     base=Path(base);slug=base.name
     by_actor={}

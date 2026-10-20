@@ -2,7 +2,7 @@
 
 --profile URL: runs harvestapi/linkedin-profile-posts (reactions+comments ON) over the profile's recent posts.
 --post URL:    runs harvestapi/linkedin-post-reactions + linkedin-post-comments on that ONE post (lnkd.in links resolved),
-               profileScraperMode=main so engagers carry vanity URL, location and company (profile mode stays opaque: see resolve.py).
+               profileScraperMode=main so engagers carry vanity URL, location and company (profile mode stays opaque; the profile stage resolves ids later).
 Both parse the flat dataset by `type` and emit:
   - <output-dir>/<slug>/posts.json     : the profile's posts
   - <output-dir>/<slug>/engagers.json  : unique engagers keyed by actor.id

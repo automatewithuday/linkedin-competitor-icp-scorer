@@ -25,17 +25,19 @@ Competitor post or personal profile → collect engagers
 
 ## Get started
 
-You need Python 3.11+, [uv](https://docs.astral.sh/uv/), Claude Code and your own [Apify](https://apify.com) token. GetLeads is optional for missing evidence. Scoring in your agent session needs no separate model API key.
+You need Python 3.11+, [uv](https://docs.astral.sh/uv/), Claude Code and your own [Apify](https://apify.com) token. GetLeads is optional for missing company evidence. Scoring happens in your agent session; no separate model API key is needed.
 
 ```bash
 git clone https://github.com/automatewithuday/linkedin-competitor-icp-scorer.git
 cd linkedin-competitor-icp-scorer
+uv sync
+cp .env.example .env     # then add APIFY_TOKEN in your editor
 claude
 ```
 
 Inside Claude Code:
 
-1. `/setup` — configure keys locally and answer the ICP questions. Confirm which criteria are mandatory, preferred or excluded. Resume whenever needed.
+1. `/setup` — check keys locally and answer the ICP questions. Confirm which criteria are mandatory, preferred or excluded. Resume whenever needed.
 2. `/icp-prompt-builder` — test your rules on batches of 10 companies. Two consecutive human-approved rounds lock an ICP. A correction resets the streak.
 3. `/first-run` — provide a competitor post or personal profile. Review the summary and CSVs.
 
@@ -52,6 +54,6 @@ One installation supports one business with multiple named ICPs. Direct buyers a
 
 Signal definitions are tailored during onboarding. Any existing dated evidence is saved; signals influence priority by default. Active hiring/funding research is a later module.
 
-Email discovery, Jev Activity Intel through TypeSafe, drafts and campaign integrations are preserved as legacy tools and are outside this core release. Core exports cannot be passed into those legacy integrations.
+The tool ends at the CSVs. Email discovery, activity checks, drafting and campaign imports are not part of it; take `qualified_leads.csv` into whatever outreach tool you use, and record what you sent with `src/ledger.py mark` so nobody is contacted twice.
 
 [Commands and data model](docs/OPERATIONS.md) · [Example ICP](examples/client-profile.example.yaml) · [Example export](examples/all_leads.core.sample.csv) · [Live sample validation](docs/VALIDATION.md)
