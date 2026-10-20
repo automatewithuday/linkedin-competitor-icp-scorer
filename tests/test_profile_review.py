@@ -16,7 +16,8 @@ class ProfileReviewTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.enterContext(patch.dict(os.environ, {'LEDGER_DB': str(self.root / 'ledger.sqlite')}))
+        self.enterContext(patch.dict(os.environ, {'LEDGER_DB': str(self.root / 'ledger.sqlite'),
+                                                  'CLAUDECODE': '', 'LLM_PROVIDER': ''}))
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.con = ledger.connect()
         self.addCleanup(self.con.close)
