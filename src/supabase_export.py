@@ -7,9 +7,9 @@ from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 try:
-    from .common import linkedin_url, post_json, read_csv, write_json
+    from .common import reject_core_exports, linkedin_url, post_json, read_csv, write_json
 except ImportError:
-    from common import linkedin_url, post_json, read_csv, write_json
+    from common import reject_core_exports, linkedin_url, post_json, read_csv, write_json
 
 
 def snapshot_rows(rows, run_id):
@@ -55,6 +55,7 @@ def main():
     if not url or not key:
         ap.error('Set SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_ROLE_KEY)')
     rows, _ = read_csv(args.input)
+    reject_core_exports(rows)
     try:
         count = export(rows, args.run_id, url, key, args.table)
     except (ValueError, RuntimeError) as exc:

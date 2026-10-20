@@ -20,7 +20,7 @@ class DecisionReasonTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.enterContext(patch.dict(os.environ, {'LEDGER_DB': str(self.root / 'ledger.sqlite'),
                                                  'LLM_PROVIDER': 'openai', 'OPENAI_API_KEY': 'offline-dummy',
-                                                 'PROSPEO_API_KEY': 'offline-dummy', 'CLAUDECODE': ''}))
+                                                 'GETLEADS_API_KEY': 'offline-dummy', 'CLAUDECODE': ''}))
         self.enterContext(contextlib.redirect_stdout(io.StringIO()))
         self.enterContext(contextlib.redirect_stderr(io.StringIO()))
         self.con = ledger.connect()
@@ -34,7 +34,7 @@ class DecisionReasonTests(unittest.TestCase):
     def result(self, **updates):
         return {'i': 0, 'icp_fit': 4, 'intent': 'high', 'evidence_comment': 1,
                 'clean_title': 'VP Sales', 'company_guess': 'Acme',
-                'qualification_reason': 'Sales leadership at a named employer in a target country matches a plausible buyer; industry and headcount remain unverified.',
+                'needs_review': False, 'qualification_reason': 'Sales leadership at a named employer in a target country matches a plausible buyer; industry and headcount remain unverified.',
                 'intent_reason': 'The comment states a current tool evaluation and a specific outbound problem.', **updates}
 
     def seed(self, people=None):
@@ -52,7 +52,7 @@ class DecisionReasonTests(unittest.TestCase):
         return path
 
     def run_rank(self, base, scores=None, min_fit=4):
-        args = ['rank.py', '--slug', base.name, '--output-dir', str(self.root), '--min-fit', str(min_fit)]
+        args = ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--min-fit', str(min_fit)]
         if scores:
             args += ['--scores', str(scores)]
         with patch('sys.argv', args):
@@ -70,7 +70,7 @@ class DecisionReasonTests(unittest.TestCase):
             rows = self.run_rank(base)
         self.assertEqual(llm.call_count, 1)
         self.assertIn('qualification_reason', llm.call_args.args[0])
-        self.assertEqual([r['qualification_status'] for r in rows], ['qualified', 'rejected'])
+        self.assertEqual([r['qualification_status'] for r in rows], ['qualified', 'not_qualified'])
         self.assertEqual([r['qualification_reason'] for r in rows], [r['qualification_reason'] for r in results])
         with patch.object(rank, 'score_batch') as scorer:
             reused = self.run_rank(base, self.score_file(base, []))
@@ -99,7 +99,7 @@ class DecisionReasonTests(unittest.TestCase):
         base = self.seed()
         original = self.run_rank(base, self.score_file(base, [self.result()]))[0]
         changed = self.run_rank(base, self.score_file(base, []), min_fit=5)[0]
-        self.assertEqual((original['qualification_status'], changed['qualification_status']), ('qualified', 'rejected'))
+        self.assertEqual((original['qualification_status'], changed['qualification_status']), ('qualified', 'not_qualified'))
         self.assertEqual((original['qualification_threshold'], changed['qualification_threshold']), ('4', '5'))
         self.assertEqual(original['qualification_reason'], changed['qualification_reason'])
         self.assertEqual(original['intent_reason'], changed['intent_reason'])
@@ -149,7 +149,7 @@ class DecisionReasonTests(unittest.TestCase):
     def test_activity_explains_active_stale_skipped_unknown_and_uncertain_cases(self):
         def row(name, **kwargs):
             return {'name': name, 'icp_fit': '4', 'linkedin_url': f'https://www.linkedin.com/in/{name}', **kwargs}
-        rows = [row('active'), row('stale'), row('rejected', icp_fit='2'), row('opaque', linkedin_url=''),
+        rows = [row('active'), row('stale'), row('not_qualified', icp_fit='2'), row('opaque', linkedin_url=''),
                 row('failed'), row('limited'), row('suppressed', ledger_status='suppressed:customer',
                 eligibility_reason='Do not contact: existing customer.'), row('partial'), row('empty')]
         hits = [{'linkedin_url': rows[0]['linkedin_url'], 'activity_status': 'active', 'outreach_reason': 'Dated post 2 days ago supports LinkedIn use.',
@@ -194,11 +194,13 @@ class DecisionReasonTests(unittest.TestCase):
                 patch.object(activity.subprocess, 'run', side_effect=fake):
             activity.main()
         enriched = base / 'enriched.csv'
-        unavailable = {'email': '', 'email_status': 'UNAVAILABLE', 'sendable': 'false', 'email_provider': 'prospeo',
-                       'email_checked_at': ledger.now(), 'miss_reason': 'no_verified_email'}
+        self.con.execute('INSERT INTO provider_enrichments VALUES (?,?,?,?,?)',
+                         ('getleads', self.person()['linkedinUrl'], 'not_found', '{}', ledger.now()))
+        self.con.commit()
         with patch('sys.argv', ['email_enrich.py', '--input', str(output), '--output', str(enriched)]), \
-                patch.object(email_enrich, 'enrich_person', return_value=unavailable):
+                patch.object(email_enrich.getleads, 'request') as request:
             email_enrich.main()
+        request.assert_not_called()
         row = common.read_csv(enriched)[0][0]
         self.assertEqual(row['qualification_reason'], self.result()['qualification_reason'])
         self.assertEqual(row['intent_reason'], self.result()['intent_reason'])
@@ -231,7 +233,7 @@ class DecisionReasonTests(unittest.TestCase):
         sample = Path(__file__).resolve().parents[1] / 'examples' / 'ranked_engagers.sample.csv'
         rows, fields = common.read_csv(sample)
         self.assertGreaterEqual(len(rows), 5)
-        self.assertTrue({'qualified', 'rejected'} <= {r['qualification_status'] for r in rows})
+        self.assertTrue({'qualified', 'not_qualified', 'needs_review'} <= {r['qualification_status'] for r in rows})
         self.assertTrue({'active', 'stale', 'not_checked', 'unknown'} <= {r['activity_status'] for r in rows})
         for r in rows:
             self.assertNotIn(None, r)
@@ -245,6 +247,8 @@ class DecisionReasonTests(unittest.TestCase):
                 self.assertEqual(r['activity_model'], '')
             if r['outreach_ready_probability']:
                 self.assertEqual(r['activity_model'], 'jev-latest')
+            if r['email']:
+                self.assertEqual((r['email_provider'], r['email_status'], r['sendable']), ('getleads', 'UNVERIFIED', 'false'))
         self.assertIn('comment_post_url', fields)
 
 

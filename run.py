@@ -1,12 +1,7 @@
-"""Orchestrator: harvest -> (enrich) -> icp -> rank -> profile lookups -> rescore -> (draft) -> (activity) -> (emails) -> (supabase) -> (smartlead preview) -> summary
+"""Qualification core entrypoint. Use --legacy only to inspect/reproduce the archived workflow.
 
-Usage:
-  uv run run.py --profile <linkedin-url> --slug <slug> --icp icp.yaml --scores output/<slug>/scores.json [options]
-  uv run run.py --post <post-url>        --slug <slug> --icp icp.yaml --scores ... [options]   # one post only
-  uv run run.py --slug <slug> --skip-harvest --icp icp.yaml --scores ...                        # reuse a paid harvest
-
-Scoring: pass --scores (judgments made in-session; see src/rank.py --dump), or let the configured LLM score:
-OPENAI_API_KEY, else the `claude` CLI when installed (LLM_PROVIDER forces one).
+Default workflow: guided ICP -> calibration -> saved evidence -> company qualification -> person qualification -> CSV.
+See docs/OPERATIONS.md for commands. No campaign stages run in the core.
 """
 import argparse
 import os
@@ -26,7 +21,7 @@ def run_step(label: str, cmd: list[str]) -> None:
         sys.exit(f"Step failed: {label} (exit {result.returncode})")
 
 
-def main() -> None:
+def legacy_main() -> None:
     ap = argparse.ArgumentParser(
         description="Full pipeline: harvest LinkedIn engagers, derive ICP, rank as warm buyers"
     )
@@ -50,9 +45,11 @@ def main() -> None:
     ap.add_argument("--max-reactions", type=int, default=100)
     ap.add_argument("--max-comments", type=int, default=50)
     ap.add_argument("--posted-limit", choices=["24h", "week", "month"], default="month")
-    ap.add_argument("--find-emails", action="store_true", help="Enrich qualified leads with Prospeo")
+    ap.add_argument("--find-emails", action="store_true", help="Find qualified leads' work emails with GetLeads (unverified)")
     ap.add_argument("--min-fit", type=int, choices=range(1, 6), default=4)
-    ap.add_argument("--max-lookups", type=int, default=100)
+    ap.add_argument('--getleads', action='store_true', help='Fill missing ICP evidence for borderline-and-up candidates with GetLeads plan credits')
+    ap.add_argument('--max-lookups', '--getleads-max-lookups', type=int, default=100,
+                    help='Shared GetLeads submission cap per slug for ICP and emails, including retries (default 100)')
     ap.add_argument("--draft", action="store_true",
                     help="Draft connection note + DM per qualified row using playbooks/copy-templates.md")
     ap.add_argument("--supabase", action="store_true", help="Also store lead snapshots in Supabase")
@@ -92,8 +89,8 @@ def main() -> None:
                  'or install the `claude` CLI and log in to your Claude subscription (LLM_PROVIDER=claude).')
     if not (args.skip_harvest and args.no_resolve) and not (os.getenv('APIFY_TOKEN') or os.getenv('APIFY_API_KEY')):
         required.append('APIFY_TOKEN')
-    if args.find_emails:
-        required.append('PROSPEO_API_KEY')
+    if args.getleads or args.find_emails:
+        required.append('GETLEADS_API_KEY')
     if args.supabase:
         required.append('SUPABASE_URL')
         if not (os.getenv('SUPABASE_SECRET_KEY') or os.getenv('SUPABASE_SERVICE_ROLE_KEY')):
@@ -135,7 +132,7 @@ def main() -> None:
     # Step 2 (optional): Enrich companies
     if args.enrich:
         enrich_cmd = [
-            py, "src/enrich.py",
+            py, "src/enrich.py", "--legacy",
             "--slug", slug,
             "--from-engagers",
             "--output-dir", out,
@@ -159,7 +156,7 @@ def main() -> None:
 
     # Step 4: Rank
     rank_cmd = [
-        py, "src/rank.py",
+        py, "src/rank.py", "--legacy",
         "--slug", slug,
         "--output-dir", out,
         "--min-fit", str(args.min_fit),
@@ -176,6 +173,10 @@ def main() -> None:
         # activity/email/exports scored without its profile evidence; paid results are kept for the rerun.
         run_step("Profile lookups before final scoring", [py, "src/resolve.py", "--slug", slug, "--output-dir", out,
                  "--min-fit", str(max(1, args.min_fit - 1))] + batch + (["--scores", args.scores] if args.scores else []))
+    if args.getleads:
+        run_step('GetLeads ICP evidence', [py, 'src/getleads.py', '--slug', slug, '--output-dir', out,
+                 '--min-fit', str(max(1, args.min_fit - 1)), '--max-lookups', str(args.max_lookups)])
+    if not args.no_resolve or args.getleads:
         with ledger.connect() as con:
             pending = ledger.pending_scores(con, Path(out) / slug)
         if args.scores and pending:
@@ -183,7 +184,7 @@ def main() -> None:
                      f"{', '.join(name for _, name in pending)}.\n"
                      f"Rescore engager indices {[i for i, _ in pending]} with `uv run src/rank.py --dump --slug {slug}`, "
                      f"update {args.scores}, then rerun this command (already-resolved profiles are not paid again).")
-        if pending and not args.scores:
+        if (pending and not args.scores) or (args.getleads and not pending):
             run_step("Rescore with profile data", rank_cmd)
 
     out_csv = Path(out) / slug / "ranked_engagers.csv"
@@ -201,8 +202,8 @@ def main() -> None:
         final_csv = activity_csv
     if args.find_emails:
         enriched = out_csv.with_name("enriched.csv")
-        run_step("Prospeo verified emails", [py, "src/email_enrich.py", "--input", str(final_csv),
-                 "--output", str(enriched), "--min-fit", str(args.min_fit), "--max-lookups", str(args.max_lookups)])
+        run_step("GetLeads work emails (unverified)", [py, "src/email_enrich.py", "--input", str(final_csv),
+                 "--output", str(enriched), "--slug", slug, "--min-fit", str(args.min_fit), "--max-lookups", str(args.max_lookups)])
         final_csv = enriched
     if args.supabase:
         run_step("Supabase snapshots", [py, "src/supabase_export.py", "--input", str(final_csv), "--run-id", slug])
@@ -219,6 +220,18 @@ def main() -> None:
     print(f"  Ranked CSV : {out_csv.resolve()}")
     print(f"  Final CSV  : {final_csv.resolve()}")
     print(f"{'='*60}")
+
+
+def main():
+    if '--legacy' in sys.argv:
+        original = sys.argv
+        sys.argv = [arg for arg in sys.argv if arg != '--legacy']
+        try:
+            return legacy_main()
+        finally:
+            sys.argv = original
+    from src.core import main as core_main
+    return core_main()
 
 
 if __name__ == "__main__":

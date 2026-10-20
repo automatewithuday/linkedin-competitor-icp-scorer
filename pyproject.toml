@@ -2,12 +2,7 @@
 name = "linkedin-competitor-icp-scorer"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = [
-    "openai",
-    "firecrawl-py",
-    "pyyaml",
-    "python-dotenv",
-    "requests",
-    "apify-client>=3.2.0",
-    "typesafe-sdk>=0.7.1",
-]
+dependencies = ["pyyaml", "python-dotenv", "requests"]
+
+[project.optional-dependencies]
+legacy = ["openai", "firecrawl-py", "apify-client>=3.2.0", "typesafe-sdk>=0.7.1"]

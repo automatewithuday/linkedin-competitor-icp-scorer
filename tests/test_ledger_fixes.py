@@ -43,13 +43,13 @@ class LedgerFixTests(unittest.TestCase):
         es = json.loads((base / 'engagers.json').read_text())
         recipient = json.loads((base / 'recipient_icp.json').read_text())
         path = base / 'scores.json'
-        common.write_json(path, {'results': [{'qualification_reason': 'Role evidence assessed against the ICP.',
+        common.write_json(path, {'results': [{'needs_review': False, 'qualification_reason': 'Role evidence assessed against the ICP.',
                                                         'intent_reason': 'Intent assessed from supplied engagement evidence.', **r, 'score_context': ledger.score_context(es[r['i']], recipient, rank.SYSTEM)}
                                             for r in results]})
         return path
 
     def rank(self, base, scores=None, dump=False):
-        args = ['rank.py', '--slug', base.name, '--output-dir', str(self.root)]
+        args = ['rank.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root)]
         args += ['--dump'] if dump else ['--scores', str(scores)]
         out = io.StringIO()
         with patch('sys.argv', args), contextlib.redirect_stdout(out):
@@ -76,7 +76,7 @@ class LedgerFixTests(unittest.TestCase):
         def execute(label, cmd):
             with patch('sys.argv', cmd[1:]):
                 modules[cmd[1]].main()
-        args = ['run.py', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
+        args = ['run.py', '--legacy', '--slug', base.name, '--output-dir', str(self.root), '--skip-harvest',
                 '--icp', str(yaml), '--scores', str(scores), '--resolve-batch', '1']
         def invoke():
             with patch('sys.argv', args):

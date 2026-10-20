@@ -20,8 +20,10 @@ import requests
 from dotenv import load_dotenv
 try:
     from .common import location_text
+    from .evidence import profile_evidence
 except ImportError:
     from common import location_text
+    from evidence import profile_evidence
 
 load_dotenv()
 
@@ -92,8 +94,8 @@ def profile_fields(actor: dict) -> tuple:
     url = actor.get("linkedinUrl")
     if not is_vanity_url(url) and actor.get("publicIdentifier"):
         url = "https://www.linkedin.com/in/" + actor["publicIdentifier"]
-    jobs = actor.get("currentPosition") or actor.get("experience") or []
-    company = (jobs[0].get("companyName") or "") if isinstance(jobs, list) and jobs and isinstance(jobs[0], dict) else ""
+    jobs = profile_evidence(actor).get("current_roles") or []
+    company = jobs[0].get("company", "") if jobs else ""
     return url, location_text(actor.get("location")), company
 
 
@@ -111,6 +113,7 @@ def build_engagers(items: list) -> list:
 
         cand, location, company = profile_fields(actor)
         position = actor.get("position") or actor.get("headline")
+        evidence = profile_evidence(actor)
         e = engagers.get(aid)
         if e is None:
             e = {
@@ -120,6 +123,7 @@ def build_engagers(items: list) -> list:
                 "position": position,
                 "location": location,
                 "company": company,
+                "profile_evidence": evidence,
                 "pictureUrl": actor.get("pictureUrl"),
                 "engagement_count": 0,
                 "posts_touched": set(),
@@ -135,6 +139,11 @@ def build_engagers(items: list) -> list:
         for k, v in (("position", position), ("location", location), ("company", company)):
             if not e.get(k) and v:
                 e[k] = v
+        if evidence and (not e.get("profile_evidence") or
+                         (evidence.get("current_roles") and not e["profile_evidence"].get("current_roles"))):
+            e["profile_evidence"] = evidence
+            if company:
+                e["company"] = company
         if not e.get("pictureUrl") and actor.get("pictureUrl"):
             e["pictureUrl"] = actor.get("pictureUrl")
 
@@ -175,24 +184,77 @@ def build_posts(items: list) -> list:
     return posts
 
 
+def claim_harvest(con, coredb, actor, payload, slug, charge_cap):
+    identity=coredb.fingerprint([slug,actor,payload])
+    with con:
+        con.execute('BEGIN IMMEDIATE')
+        old=con.execute("SELECT * FROM provider_requests WHERE provider='apify' AND purpose='harvest' AND identity=? ORDER BY id DESC LIMIT 1",(identity,)).fetchone()
+        retry=os.getenv('CORE_RETRY_UNKNOWN')=='1'
+        if old and not (retry and old['status'] in ('pending','unknown')):
+            return dict(old),False
+        cap=charge_cap or 0
+        budget=float(os.getenv('CORE_HARVEST_BUDGET') or cap or 1)
+        used=con.execute("SELECT COALESCE(SUM(charge_cap),0) FROM provider_requests WHERE purpose='harvest' AND run_slug=?",(slug,)).fetchone()[0]
+        if used+cap>budget+1e-9:
+            raise RuntimeError('Harvest budget already reserved; review previous requests before increasing the cap')
+        con.execute('INSERT OR IGNORE INTO core_runs(slug,created_at) VALUES (?,?)',(slug,coredb.ledger.now()))
+        rid=con.execute('INSERT INTO provider_requests(provider,purpose,identity,run_slug,request_json,status,submitted_at,charge_cap) '
+                        "VALUES ('apify','harvest',?,?,?,'pending',?,?)",(identity,slug,coredb.encode({'actor':actor,'input':payload}),coredb.ledger.now(),cap)).lastrowid
+    return dict(con.execute('SELECT * FROM provider_requests WHERE id=?',(rid,)).fetchone()),True
+
+
 def run_actor(actor: str, payload: dict, token: str, max_usd: float | None = None) -> tuple[list, dict]:
     """Start an actor run, poll to completion, return (dataset items, final run record). Exits on failure."""
-    run = post_run(actor, payload, token, max_usd)
-    run_id, ds_id = run["id"], run["defaultDatasetId"]
-    print(f"  run_id={run_id} dataset={ds_id}")
-    deadline = time.monotonic() + 1800
-    while True:
-        if time.monotonic() > deadline:
-            sys.exit(f"Polling deadline exceeded; check Apify run {run_id} before starting another paid run")
-        time.sleep(8)
-        run = get_run(run_id, token)
-        st = run["status"]
-        print(f"  status={st}")
-        if st in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
-            break
-    if st != "SUCCEEDED":
-        sys.exit(f"Run did not succeed: {st} (usageTotalUsd=${run.get('usageTotalUsd')})")
-    return get_items(ds_id, token), run
+    # Persist the request before POST, remote IDs before polling, and full data before parsing it.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from src import coredb
+    con = coredb.connect()
+    slug = os.getenv('CORE_RUN_SLUG') or 'standalone'
+    try:
+        request, start = claim_harvest(con, coredb, actor, payload, slug, max_usd)
+    except Exception:
+        con.close()
+        raise
+    old = request if not start else None
+    if old and old['status'] == 'complete':
+        record = con.execute("SELECT data FROM raw_records WHERE request_id=? AND record_key='dataset' ORDER BY id DESC LIMIT 1", (old['id'],)).fetchone()
+        if record:
+            con.close()
+            return json.loads(record[0]), {'id': old['remote_run_id'], 'defaultDatasetId': old['dataset_id'], 'usageTotalUsd': 0}
+    if old and old['status'] in ('pending', 'unknown') and not old['remote_run_id']:
+        con.close()
+        raise RuntimeError('Harvest submission outcome is unknown. Check Apify before starting another paid run.')
+    rid = request['id']
+    try:
+        if old and old['remote_run_id']:
+            run = get_run(old['remote_run_id'], token)
+        else:
+            run = post_run(actor, payload, token, max_usd)
+        run_id, ds_id = run['id'], run['defaultDatasetId']
+        coredb.finish_request(con, rid, 'running', run_id, ds_id)
+        print(f'  run_id={run_id} dataset={ds_id}')
+        deadline = time.monotonic() + 1800
+        while run['status'] not in ('SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'):
+            if time.monotonic() > deadline:
+                raise TimeoutError()
+            time.sleep(8)
+            run = get_run(run_id, token)
+            print(f"  status={run['status']}")
+        items = get_items(ds_id, token)
+        coredb.raw(con, rid, 'dataset', items)
+        for i, item in enumerate(items):
+            coredb.raw(con, rid, i, item)
+        coredb.finish_request(con, rid, 'complete' if run['status'] == 'SUCCEEDED' else 'error', run_id, ds_id)
+        if run['status'] != 'SUCCEEDED':
+            raise RuntimeError('Harvest did not succeed. Partial data is saved; reconcile the provider run before retrying.')
+        return items, run
+    except Exception:
+        row = con.execute('SELECT status FROM provider_requests WHERE id=?', (rid,)).fetchone()
+        if row and row[0] != 'error':
+            coredb.finish_request(con, rid, 'unknown')
+        raise RuntimeError('Harvest failed or outcome is unknown; stored request/run IDs must be checked before retrying.') from None
+    finally:
+        con.close()
 
 
 def tag_post_items(items: list, kind: str) -> list:
@@ -206,6 +268,8 @@ def main() -> None:
     src.add_argument("--profile", help="LinkedIn profile URL: harvest its recent posts")
     src.add_argument("--post", help="LinkedIn post URL (lnkd.in links accepted): harvest only this post")
     ap.add_argument("--slug", required=True, help="Slug for output directory")
+    ap.add_argument("--retry-unknown", action="store_true", help="Only after checking Apify; may incur another charge")
+    ap.add_argument("--max-usd", type=float, default=1.0, help="Total hard cap for collection actor runs")
     ap.add_argument("--max-posts", type=int, default=0, help="Max posts to fetch (0 = all; profile mode only)")
     ap.add_argument("--max-reactions", type=int, default=100)
     ap.add_argument("--max-comments", type=int, default=50)
@@ -213,7 +277,12 @@ def main() -> None:
     ap.add_argument("--output-dir", default="./output", help="Base output directory")
     args = ap.parse_args()
 
+    if args.max_usd <= 0:
+        ap.error("--max-usd must be positive")
     token = load_token()
+    os.environ["CORE_RUN_SLUG"] = args.slug
+    os.environ["CORE_HARVEST_BUDGET"] = str(args.max_usd)
+    os.environ["CORE_RETRY_UNKNOWN"] = "1" if args.retry_unknown else "0"
     out_dir = Path(args.output_dir) / args.slug
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -224,9 +293,12 @@ def main() -> None:
         items, cost = [], 0.0
         for kind, actor in POST_ACTORS.items():
             n = args.max_reactions if kind == "reaction" else args.max_comments
+            if n <= 0:
+                continue
             # main mode: actor becomes a full profile (vanity URL, location, current company), +$0.002/engager
             payload = {"posts": [post], "maxItems": n, "profileScraperMode": "main"}
-            cap = round(n * (POST_ITEM_USD + POST_PROFILE_USD) * 1.25 + 0.05, 2)
+            cap = min(round(n * (POST_ITEM_USD + POST_PROFILE_USD) * 1.25 + 0.05, 2),
+                      args.max_usd * n / max(1, args.max_reactions + args.max_comments))
             print(f"Run: {actor} on {post}")
             print(f"  maxItems={n} spend cap=${cap:.2f}")
             got, run = run_actor(actor, payload, token, cap)
@@ -240,9 +312,9 @@ def main() -> None:
             "targetUrls": [args.profile],
             "maxPosts": args.max_posts,
             "postedLimit": args.posted_limit,
-            "scrapeReactions": True,
+            "scrapeReactions": args.max_reactions > 0,
             "maxReactions": args.max_reactions,
-            "scrapeComments": True,
+            "scrapeComments": args.max_comments > 0,
             "maxComments": args.max_comments,
             "commentsPostedLimit": args.posted_limit,
             "includeReposts": True,
@@ -251,7 +323,7 @@ def main() -> None:
         print(f"Run: {ACTOR} on {args.profile}")
         print(f"  maxPosts={args.max_posts} maxReactions={args.max_reactions} "
               f"maxComments={args.max_comments} postedLimit={args.posted_limit}")
-        items, run = run_actor(ACTOR, payload, token)
+        items, run = run_actor(ACTOR, payload, token, args.max_usd)
         cost = run.get("usageTotalUsd")
         posts = build_posts(items)
         source = args.profile

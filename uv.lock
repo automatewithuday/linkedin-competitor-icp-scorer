@@ -790,25 +790,30 @@ name = "linkedin-competitor-icp-scorer"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "apify-client" },
-    { name = "firecrawl-py" },
-    { name = "openai" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
+]
+
+[package.optional-dependencies]
+legacy = [
+    { name = "apify-client" },
+    { name = "firecrawl-py" },
+    { name = "openai" },
     { name = "typesafe-sdk" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "apify-client", specifier = ">=3.2.0" },
-    { name = "firecrawl-py" },
-    { name = "openai" },
+    { name = "apify-client", marker = "extra == 'legacy'", specifier = ">=3.2.0" },
+    { name = "firecrawl-py", marker = "extra == 'legacy'" },
+    { name = "openai", marker = "extra == 'legacy'" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "requests" },
-    { name = "typesafe-sdk", specifier = ">=0.7.1" },
+    { name = "typesafe-sdk", marker = "extra == 'legacy'", specifier = ">=0.7.1" },
 ]
+provides-extras = ["legacy"]
 
 [[package]]
 name = "more-itertools"

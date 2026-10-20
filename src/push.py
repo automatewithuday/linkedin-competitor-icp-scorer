@@ -6,10 +6,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import fit, ledger_ok, post_json, read_csv, valid_email, write_json
+    from .common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json
     from . import ledger
 except ImportError:
-    from common import fit, ledger_ok, post_json, read_csv, valid_email, write_json
+    from common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json
     import ledger
 
 
@@ -22,7 +22,7 @@ def select_leads(rows, min_fit=4, max_age_days=30):
             fresh = 0 <= age <= max_age_days * 86400
         except (ValueError, TypeError):
             fresh = False
-        if (not valid_email(email) or email in seen or fit(row) < min_fit or not fresh
+        if (not valid_email(email) or email in seen or not qualification_ok(row, min_fit) or not fresh
                 or row.get('sendable', '').lower() != 'true'
                 or row.get('email_status', '').upper() != 'VERIFIED'
                 or row.get('suppressed', '').lower() == 'true' or not ledger_ok(row)):
@@ -85,6 +85,7 @@ def main():
     if args.campaign_id <= 0 or args.max_email_age_days <= 0:
         ap.error('Campaign ID and email age must be positive')
     rows, _ = read_csv(args.input)
+    reject_core_exports(rows)
     con = ledger.connect()
     rows, dropped = ledger.filter_export_rows(con, rows, Path(args.input).parent)
     leads, excluded = select_leads(rows, args.min_fit, args.max_email_age_days)

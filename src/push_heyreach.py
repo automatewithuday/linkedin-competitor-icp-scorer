@@ -13,10 +13,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 try:
-    from .common import fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
+    from .common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
     from . import ledger
 except ImportError:
-    from common import fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
+    from common import reject_core_exports, qualification_ok, fit, ledger_ok, post_json, read_csv, valid_email, write_json, linkedin_url
     import ledger
 
 BASE = 'https://api.heyreach.io/api/public'
@@ -30,6 +30,7 @@ def load_drafts(input_path):
     if not p.exists():
         return {}
     rows, _ = read_csv(p)
+    reject_core_exports(rows)
     return {r.get('linkedin_url', ''): r for r in rows}
 
 
@@ -39,7 +40,7 @@ def select_leads(rows, min_fit=4, drafts=None):
         raw = (row.get('linkedin_url') or '').strip()
         # Apify often returns member-ID URLs (/in/ACoAA...). LinkedIn resolves them, HeyReach accepts them.
         url = linkedin_url(raw) or (raw if re.fullmatch(r'https://www\.linkedin\.com/in/ACoAA[\w-]+/?', raw) else '')
-        if not url or url in seen or fit(row) < min_fit or row.get('suppressed', '').lower() == 'true' or not ledger_ok(row):
+        if not url or url in seen or not qualification_ok(row, min_fit) or row.get('suppressed', '').lower() == 'true' or not ledger_ok(row):
             excluded += 1
             continue
         seen.add(url)
@@ -108,6 +109,7 @@ def main():
     if min(target.values()) <= 0:
         ap.error('IDs must be positive')
     rows, _ = read_csv(args.input)
+    reject_core_exports(rows)
     con = ledger.connect()
     rows, dropped = ledger.filter_export_rows(con, rows, Path(args.input).parent)
     leads, excluded = select_leads(rows, args.min_fit, load_drafts(args.input))

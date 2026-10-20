@@ -22,7 +22,7 @@ def verified_row(**changes):
 
 
 def explained(result):
-    return {'qualification_reason': 'The stated role and employer evidence were compared with the ICP.',
+    return {'needs_review': False, 'qualification_reason': 'The stated role and employer evidence were compared with the ICP.',
             'intent_reason': 'Intent reflects the supplied comment or reaction evidence.', **result}
 
 
@@ -44,11 +44,6 @@ class IdentityTests(unittest.TestCase):
                     'https://linkedin.com/company/acme', 'https://linkedin.com/in/ACoAA123']:
             self.assertEqual(common.linkedin_url(url), '')
 
-    def test_no_guessed_company_match(self):
-        self.assertIsNone(email_enrich.identity({'name': 'Jane', 'company_guess': 'Acme'}))
-        self.assertEqual(email_enrich.identity({'name': 'Jane Doe', 'domain': 'example.com'}),
-                         {'full_name': 'Jane Doe', 'company_website': 'example.com'})
-
     def test_csv_unicode_and_empty_output(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'nested' / 'test.csv'
@@ -58,56 +53,21 @@ class IdentityTests(unittest.TestCase):
             self.assertEqual(common.read_csv(path), ([], ['name']))
 
 
-class ProspeoTests(unittest.TestCase):
-    @patch('src.email_enrich.post_json')
-    def test_verified_contract(self, post):
-        post.return_value = {'error': False, 'person': {'email': {
-            'email': 'jane@example.com', 'status': 'VERIFIED', 'revealed': True}}}
-        self.assertEqual(email_enrich.enrich_person({'linkedin_url': 'url'}, 'secret')['sendable'], 'true')
-        self.assertTrue(post.call_args.kwargs['json']['only_verified_email'])
-        self.assertFalse(post.call_args.kwargs['json']['enrich_mobile'])
-        self.assertEqual(post.call_args.kwargs['headers']['X-KEY'], 'secret')
+class EmailContractTests(unittest.TestCase):
+    def test_discovered_work_email_never_becomes_sendable(self):
+        hit = {'status': 'matched', 'checked_at': ledger.now(),
+               'data': json.dumps({'work_email': 'jane@example.com', 'email_status': 'VERIFIED'})}
+        result = email_enrich.email_result(hit)
+        self.assertEqual((result['email'], result['email_status'], result['sendable']),
+                         ('jane@example.com', 'UNVERIFIED', 'false'))
+        self.assertEqual(result['email_provider'], 'getleads')
+        self.assertEqual(result['miss_reason'], 'verification_required')
 
-    @patch('src.email_enrich.post_json')
-    def test_not_verified_or_masked(self, post):
-        for status, email, revealed in [('CATCH_ALL', 'jane@example.com', True),
-                                        ('VERIFIED', 'ja***@example.com', True),
-                                        ('VERIFIED', 'jane@example.com', False)]:
-            post.return_value = {'person': {'email': {'email': email, 'status': status, 'revealed': revealed}}}
-            self.assertEqual(email_enrich.enrich_person({}, 'key')['sendable'], 'false')
-
-    @patch('src.email_enrich.post_json')
-    def test_no_match_is_an_explicit_miss(self, post):
-        post.return_value = {'error': True, 'error_code': 'NO_MATCH'}
-        result = email_enrich.enrich_person({}, 'key')
-        self.assertEqual(result['miss_reason'], 'no_verified_match')
-        self.assertEqual(result['sendable'], 'false')
-
-    @patch('src.email_enrich.post_json')
-    def test_malformed_nested_response_fails_explicitly(self, post):
-        for response in [{'person': []}, {'person': 'wrong'}, {'person': {'email': 'wrong'}},
-                         {'person': {'email': {'status': 123}}}]:
-            if response == {'person': []}:
-                continue  # Empty missing person is a normal unavailable result.
-            post.return_value = response
-            with self.assertRaises(RuntimeError):
-                email_enrich.enrich_person({}, 'key')
-
-    @patch.dict('os.environ', {'PROSPEO_API_KEY': 'test'})
-    @patch('src.email_enrich.enrich_person')
-    def test_rerun_cache_and_lookup_cap(self, enrich):
-        enrich.return_value = {k: verified_row().get(k, '') for k in email_enrich.FIELDS}
-        with tempfile.TemporaryDirectory() as d:
-            source, output = str(Path(d) / 'in.csv'), str(Path(d) / 'out.csv')
-            rows = [verified_row(), verified_row(linkedin_url='https://linkedin.com/in/other')]
-            common.write_csv(source, rows, list(rows[0]))
-            argv = ['email_enrich.py', '--input', source, '--output', output, '--max-lookups', '1']
-            with patch('sys.argv', argv):
-                email_enrich.main()
-                self.assertEqual(enrich.call_count, 1)
-                self.assertEqual(common.read_csv(output)[0][1]['miss_reason'], 'lookup_limit_reached')
-                email_enrich.main()
-                self.assertEqual(enrich.call_count, 2)
+    def test_misses_and_invalid_addresses_stay_unsendable(self):
+        for status, data in [('not_found', {}), ('matched', {'work_email': 'ja***@example.com'}),
+                             ('matched', {'work_email': 'broken'}), ('matched', {})]:
+            result = email_enrich.email_result({'status': status, 'data': json.dumps(data), 'checked_at': ledger.now()})
+            self.assertEqual((result['email'], result['email_status'], result['sendable']), ('', 'UNAVAILABLE', 'false'))
 
 
 class SmartleadTests(unittest.TestCase):
@@ -321,7 +281,7 @@ class ScorerAndSummaryTests(unittest.TestCase):
                                                       {'i': 1, 'icp_fit': 1, 'intent': None}]}))
             bind_scores(base, scores)
             with patch.dict('os.environ', {'OPENAI_API_KEY': ''}), \
-                 patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+                 patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             rows, cols = common.read_csv(base / 'ranked_engagers.csv')
         score_batch.assert_not_called()
@@ -469,7 +429,7 @@ class LockedVersionTests(unittest.TestCase):
             base = Path(d) / 's'; base.mkdir()
             (base / 'engagers.json').write_text('[{"id": "A", "name": "J"}]'); (base / 'recipient_icp.json').write_text('{}')
             with patch.dict('os.environ', {'CLAUDECODE': '1', 'LLM_PROVIDER': '', 'OPENAI_API_KEY': 'k'}), \
-                 patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d]), self.assertRaises(SystemExit):
+                 patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d]), self.assertRaises(SystemExit):
                 rank.main()
         score_batch.assert_not_called()
 
@@ -483,7 +443,7 @@ class LockedVersionTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 2, 'intent': 'high'}, {'i': 1, 'icp_fit': 4, 'intent': None}]}))
             bind_scores(base, scores)
-            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+            with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             rows, _ = common.read_csv(base / 'ranked_engagers.csv')
         self.assertEqual([r['name'] for r in rows], ['Buyer', 'Commenter'])  # 2*(1+ln3)*1.0 > 4*0.3, still second
@@ -602,9 +562,9 @@ class ReviewFindingTests(unittest.TestCase):
                 (base / f).write_text('[]')
             icp_path, scores = Path(d) / 'icp.yaml', Path(d) / 'scores.json'
             icp_path.write_text('titles: []'); scores.write_text('{"results": []}')
-            argv = ['run.py', '--slug', 's', '--output-dir', d, '--skip-harvest', '--icp', str(icp_path),
+            argv = ['run.py', '--legacy', '--slug', 's', '--output-dir', d, '--skip-harvest', '--icp', str(icp_path),
                     '--scores', str(scores), '--activity', '--find-emails']
-            with patch.dict('os.environ', {'TYPESAFE_API_KEY': 'x', 'PROSPEO_API_KEY': 'x'}), \
+            with patch.dict('os.environ', {'TYPESAFE_API_KEY': 'x', 'GETLEADS_API_KEY': 'x'}), \
                  patch('run.subprocess.run', side_effect=fake), patch('sys.argv', argv), self.assertRaises(SystemExit):
                 orchestrator.main()
         self.assertEqual(sum('src/resolve.py' in c for c in calls), 1)
@@ -623,7 +583,7 @@ class ReviewFindingTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': 'high', 'evidence_comment': 2}]}))
             bind_scores(base, scores)
-            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+            with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
         self.assertTrue(row['comment_excerpt'].startswith('We are evaluating vendors'))
@@ -637,7 +597,7 @@ class ReviewFindingTests(unittest.TestCase):
             scores = Path(d) / 'scores.json'
             scores.write_text(json.dumps({'results': [{'i': 0, 'icp_fit': 4, 'intent': None, 'company_guess': None}]}))
             bind_scores(base, scores)
-            with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
+            with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', d, '--scores', str(scores)]):
                 rank.main()
             row = common.read_csv(base / 'ranked_engagers.csv')[0][0]
         self.assertEqual((row['company_guess'], row['company_source']), ('Acme', 'profile'))
@@ -716,13 +676,13 @@ class LedgerTests(unittest.TestCase):
         ledger.record_scores(ledger.connect(), engs[:1], [explained({'icp_fit': 5, 'intent': None, 'clean_title': 'CRO'})],
                              {'titles': ['CRO']}, rank.SYSTEM, 'in-session', 'old')
         out = io.StringIO()
-        with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--dump']), patch('sys.stdout', out):
+        with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', self.tmp.name, '--dump']), patch('sys.stdout', out):
             rank.main()
         self.assertIn('1. New', out.getvalue()); self.assertNotIn('0. Seen', out.getvalue())
         scores = Path(self.tmp.name) / 'scores.json'
         scores.write_text(json.dumps({'results': [{'i': 1, 'icp_fit': 2, 'intent': None}]}))  # only the pending row
         bind_scores(base, scores)
-        with patch('sys.argv', ['rank.py', '--slug', 's', '--output-dir', self.tmp.name, '--scores', str(scores)]):
+        with patch('sys.argv', ['rank.py', '--legacy', '--slug', 's', '--output-dir', self.tmp.name, '--scores', str(scores)]):
             rank.main()
         rows = {r['name']: r['icp_fit'] for r in common.read_csv(base / 'ranked_engagers.csv')[0]}
         self.assertEqual(rows, {'Seen': '5', 'New': '2'})

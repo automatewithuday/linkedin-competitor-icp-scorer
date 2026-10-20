@@ -22,17 +22,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 try:
     from .common import fit, linkedin_url, read_csv, write_json
-    from .harvest import profile_fields
+    from .harvest import profile_fields, profile_evidence
     from . import ledger
 except ImportError:
     from common import fit, linkedin_url, read_csv, write_json
-    from harvest import profile_fields
+    from harvest import profile_fields, profile_evidence
     import ledger
 
 ACTOR = 'harvestapi/linkedin-profile-scraper'
 MODE = 'Profile details no email ($4 per 1k)'
 PROFILE_USD = 0.004
-MISS_DAYS = 30  # same horizon as the Prospeo cache: profiles change, a miss is not permanent
+MISS_DAYS = 30  # profiles change; a miss is not permanent
 FAILED_EXIT = 3
 
 
@@ -100,6 +100,9 @@ def enrich_harvest(base, min_fit, batch_size=0, dry_run=False, refresh_misses=Fa
             e['linkedinUrl'], e['resolve_status'] = linkedin_url(hit['public_url']), 'resolved'
             e['location'] = e.get('location') or hit.get('location') or ''
             e['company'] = e.get('company') or hit.get('company') or ''
+            if (hit.get('profile_evidence') and not e.get('profile_evidence') and
+                    (not e.get('company') or e['company'] == hit.get('company'))):
+                e['profile_evidence'] = hit['profile_evidence']
             changed.append(i); shared += 1
         elif hit and hit['status'] == 'not_found' and e.get('resolve_status') != 'not_found':
             e['resolve_status'], e['resolve_checked_at'] = 'not_found', hit['checked_at']
@@ -141,7 +144,10 @@ def enrich_harvest(base, min_fit, batch_size=0, dry_run=False, refresh_misses=Fa
                 if linkedin_url(url):
                     e['linkedinUrl'] = linkedin_url(url)
                     e['location'] = e.get('location') or location
-                    e['company'] = e.get('company') or company
+                    e['company'] = company or e.get('company') or ''
+                    evidence = profile_evidence(found[pid])
+                    if evidence:
+                        e['profile_evidence'] = evidence
                     e['resolve_status'] = 'resolved'
                     changed.append(i)
                     ledger.record_lookup(con, pid, 'resolved', e['linkedinUrl'], run_id, e)

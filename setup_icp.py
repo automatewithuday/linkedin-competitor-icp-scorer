@@ -1,19 +1,4 @@
-"""ICP intake: website first, then a short interview with pre-filled answers.
-
-Writes icp.yaml for `src/icp.py --icp` / `run.py --icp`.
-
-Flow:
-  1. Optional website. It is scraped (Firecrawl if configured, plain HTTP otherwise)
-     and the LLM proposes an ICP you confirm or correct. This anchors the interview.
-  2. Nine questions, each pre-filled from the proposal. Enter accepts the pre-fill.
-  3. The LLM cleans the answers and expands job titles with common synonyms, because
-     headline matching is all the scorer has and "VP Sales" alone misses "Head of Sales".
-  4. You review the final ICP and it is written.
-
-Without an LLM (no OpenAI key, no claude CLI) the raw answers are written as-is.
-Hard filters (titles, industries, size, geos, disqualifiers) decide fit. Triggers are
-soft: they are personalization context, never a reason to reject someone.
-"""
+"""Resumable question-by-question ICP onboarding. --legacy exposes the archived form."""
 import argparse
 import json
 import sys
@@ -80,7 +65,7 @@ def show(icp: dict) -> None:
     print(yaml.dump(icp, allow_unicode=True, sort_keys=False))
 
 
-def main() -> None:
+def legacy_main() -> None:
     ap = argparse.ArgumentParser(description="ICP intake -> icp.yaml")
     ap.add_argument("--output", default="icp.yaml")
     ap.add_argument("--website", help="Skip the first prompt and scrape this site")
@@ -147,6 +132,14 @@ def main() -> None:
     out_path.write_text(yaml.dump(icp, allow_unicode=True, sort_keys=False), encoding="utf-8")
     print(f"\n  -> {out_path.resolve()}")
     print("  Next: run.py --icp icp.yaml against a competitor profile with --max-posts 3 to sanity-check scoring.")
+
+
+def main():
+    if '--legacy' in sys.argv:
+        sys.argv.remove('--legacy')
+        return legacy_main()
+    from src.profiles import main as profile_main
+    return profile_main(['intake', *sys.argv[1:]])
 
 
 if __name__ == "__main__":
